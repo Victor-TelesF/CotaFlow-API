@@ -1,0 +1,24 @@
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.13.5"
+          python-version: "3.13"
+      - name: Instalar dependências pelo lockfile
+        run: uv sync --locked
+      - name: Validar Compose com configuração fictícia
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+      - name: Construir imagem
+        run: docker compose build
