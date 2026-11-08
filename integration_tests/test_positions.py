@@ -143,7 +143,7 @@ def test_stock_fii_costs_and_constant_query_count(
         event.remove(engine, "before_cursor_execute", record)
     # One SELECT for authenticated identity, one joined SELECT for all facts.
     assert len(statements) == 2
-    assert "JOIN assets" in statements[1]
+    assert "JOIN cotaflow.assets" in statements[1]
     assert "LIMIT" not in statements[1]
     assert "FOR UPDATE" not in statements[1]
     assert [item["ticker"] for item in body["positions"]] == ["FUND11", "TEST3"]
@@ -288,7 +288,7 @@ def test_read_failure_returns_safe_503_without_partial_total(
     engine = session_factory.kw["bind"]
     with engine.begin() as connection:
         connection.execute(
-            text("ALTER TABLE transactions RENAME TO unavailable_transactions")
+            text("ALTER TABLE cotaflow.transactions RENAME TO unavailable_transactions")
         )
     response = client.get(POSITIONS, headers=headers[0])
     assert response.status_code == 503

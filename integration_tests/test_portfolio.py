@@ -433,7 +433,7 @@ def test_failure_after_insert_rolls_back_real_transaction(
     def fail_after_insert(
         connection, cursor, statement, parameters, context, executemany
     ):
-        if statement.startswith("INSERT INTO transactions"):
+        if statement.startswith("INSERT INTO cotaflow.transactions"):
             raise IntegrityError(
                 "synthetic post-insert error", None, RuntimeError("synthetic")
             )
@@ -457,7 +457,7 @@ def test_concurrent_catalog_registration_has_one_winner(
     barrier = Barrier(2)
 
     def coordinate(connection, cursor, statement, parameters, context, executemany):
-        if statement.startswith("INSERT INTO assets"):
+        if statement.startswith("INSERT INTO cotaflow.assets"):
             barrier.wait(timeout=5)
 
     def create(ticker):

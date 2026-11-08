@@ -1,4 +1,4 @@
-"""Rotas e segurança reais sobre PostgreSQL de schema exclusivo por teste."""
+"""Rotas e segurança reais sobre PostgreSQL de banco exclusivo por teste."""
 
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -20,7 +20,7 @@ from presentation.http.dependencies import CurrentUser
 
 @pytest.fixture
 def auth_client(session_factory):
-    # Lifespan resources remain real; only the UoW factory points at the isolated schema.
+    # Lifespan resources remain real; the UoW factory uses the isolated database.
     app = create_app(
         Settings(
             _env_file=None,
@@ -205,7 +205,7 @@ def test_concurrent_registration_has_one_winner_and_one_safe_conflict(
     barrier = Barrier(2)
 
     def coordinate(connection, cursor, statement, parameters, context, executemany):
-        if statement.startswith("INSERT INTO users"):
+        if statement.startswith("INSERT INTO cotaflow.users"):
             barrier.wait(timeout=5)
 
     def register(password):
@@ -272,7 +272,7 @@ def test_real_database_failure_does_not_expose_sql_or_credentials(
     auth_client, session_factory
 ):
     with session_factory.begin() as session:
-        session.execute(text("ALTER TABLE users RENAME TO unavailable_users"))
+        session.execute(text("ALTER TABLE cotaflow.users RENAME TO unavailable_users"))
     response = auth_client.post(
         "/api/v1/auth/login",
         json={"email": "private@example.com", "password": "private-password"},
