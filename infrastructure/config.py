@@ -64,3 +64,14 @@ class SecuritySettings(BaseSettings):
 
     JWT_SECRET_KEY: SecretStr = Field(min_length=32)
     JWT_ACCESS_TOKEN_MINUTES: int = Field(default=30, ge=1, le=1440)
+
+
+class MarketSettings(BaseSettings):
+    """Token opcional: símbolos públicos funcionam sem chave; falhas viram 503.
+
+    Política inicial fixa: TTL 1.800 s, 512 entradas, orçamento de busca 10 s,
+    timeouts por I/O de até 2 s. Não configura outro endpoint/provedor.
+    """
+
+    model_config = Settings.model_config
+    BRAPI_TOKEN: SecretStr = SecretStr("")
