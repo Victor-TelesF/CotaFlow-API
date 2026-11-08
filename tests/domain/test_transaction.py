@@ -17,6 +17,29 @@ from domain.portfolio.transaction import Transaction
 
 
 class TestTransactionId:
+    def test_persisted_id_can_be_restored(self, petr4, past_date):
+        transaction_id = UUID("00000000-0000-0000-0000-000000000123")
+        tx = Transaction(
+            petr4,
+            Decimal(10),
+            Decimal(35),
+            TransactionType.BUY,
+            past_date,
+            id_transaction=transaction_id,
+        )
+        assert tx.id_transaction == transaction_id
+
+    def test_invalid_persisted_id_is_rejected(self, petr4, past_date):
+        with pytest.raises(InvalidValueError, match="UUID"):
+            Transaction(
+                petr4,
+                Decimal(10),
+                Decimal(35),
+                TransactionType.BUY,
+                past_date,
+                id_transaction="invalid-id",
+            )
+
     def test_id_is_generated_automatically(self, petr4, past_date):
         tx = Transaction(
             petr4, Decimal(10), Decimal(35), TransactionType.BUY, past_date

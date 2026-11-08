@@ -1,4 +1,9 @@
-"""Immutable operations and their stable historical order."""
+"""Fatos imutáveis de compra/venda e convenção única de ordenação histórica.
+
+Preço e data informados na operação nunca são substituídos por cotação atual.
+Este módulo valida uma operação isolada; o saldo ao longo de todo o histórico
+é verificado por Position/Portfolio.
+"""
 
 from dataclasses import dataclass, field
 from datetime import date
@@ -20,15 +25,27 @@ from ..reference_date import reference_date
 
 @dataclass(frozen=True, eq=False)
 class Transaction:
+    """Operação com valores Decimal exatos e data não futura.
+
+    Quantidade/preço precisam ser positivos, finitos e representáveis em
+    NUMERIC(18, 8), sem arredondamento. Operações novas geram UUID e podem
+    estar sem sequência; a persistência atribui uma sequência positiva.
+    ``id_transaction`` pode ser informado por nome ao restaurar uma linha,
+    preservando sua identidade sem contornar as validações do domínio.
+    """
+
     asset: Asset
     quantity: Decimal
     price: Decimal
     transaction_type: TransactionType
     transaction_date: date
     transaction_sequence: int | None = None
-    id_transaction: UUID = field(default_factory=uuid4, init=False)
+    id_transaction: UUID = field(default_factory=uuid4, kw_only=True)
 
     def __post_init__(self) -> None:
+        """Valida identidade, ativo, valores, tipo, data e sequência opcional."""
+        if not isinstance(self.id_transaction, UUID):
+            raise InvalidValueError("ID da transação deve ser UUID")
         if not isinstance(self.asset, Asset):
             raise InvalidValueError("Asset deve ser uma instância de Asset")
         validate_transaction_decimal(self.quantity, InvalidQuantityError)
@@ -50,7 +67,11 @@ class Transaction:
 
 
 def ordered_transactions(transactions: list[Transaction]) -> list[Transaction]:
-    """Sort by date/sequence; new same-day operations follow persisted ones."""
+    """Retorna outra lista ordenada por data e sequência persistida.
+
+    Na mesma data, operações novas sem sequência seguem as já persistidas e
+    mantêm sua ordem de entrada entre si. A lista recebida não é alterada.
+    """
     if any(not isinstance(transaction, Transaction) for transaction in transactions):
         raise InvalidValueError("O histórico deve conter apenas transações")
     return [
