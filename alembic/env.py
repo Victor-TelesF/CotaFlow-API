@@ -1,11 +1,10 @@
 from logging.config import fileConfig
 
 from alembic import context
-
-from app.database import Base, engine
+from infrastructure.database.session import Base, engine
 
 # Importe aqui os futuros módulos de modelos para registrar suas tabelas.
-# Exemplo: from app import models
+# Exemplo: from infrastructure.database import models
 
 config = context.config
 if config.config_file_name is not None:
