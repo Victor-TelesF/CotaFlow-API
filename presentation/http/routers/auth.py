@@ -9,11 +9,19 @@ from presentation.http.schemas.auth import (
     TokenResponse,
     UserResponse,
 )
+from presentation.http.schemas.errors import AUTHENTICATION_ERROR, ErrorResponse
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=UserResponse, status_code=201)
+@router.post(
+    "/register",
+    response_model=UserResponse,
+    status_code=201,
+    responses={
+        409: {"model": ErrorResponse, "description": "Email already registered"}
+    },
+)
 def register_user(body: RegisterRequest, request: Request) -> UserResponse:
     """Cria identidade e retorna apenas UUID/email; duplicata resulta em 409."""
     user = register(
@@ -25,7 +33,9 @@ def register_user(body: RegisterRequest, request: Request) -> UserResponse:
     return UserResponse(id=user.id, email=user.email)
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login", response_model=TokenResponse, responses={401: AUTHENTICATION_ERROR}
+)
 def login_user(
     body: LoginRequest, request: Request, response: Response
 ) -> TokenResponse:

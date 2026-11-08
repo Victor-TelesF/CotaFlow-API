@@ -1,4 +1,4 @@
-"""Resolução de identidade reutilizável pelas futuras rotas protegidas."""
+"""Resolução de identidade compartilhada pelas rotas protegidas."""
 
 from typing import Annotated
 
