@@ -40,9 +40,9 @@ def disposable_database_url():
 
 
 def migrate(engine, revision="head"):
-    """Executa revisões no schema da conexão fornecida pelo teste.
+    """Executa revisões no banco exclusivo da conexão fornecida pelo teste.
 
-    O engine da fixture já restringe o search_path a um schema exclusivo.
+    A fixture cria um banco descartável por teste, com o schema real cotaflow.
     ``base`` reverte a migration; ``head`` aplica a revisão mais recente.
     """
     config = Config(str(PROJECT_ROOT / "alembic.ini"))

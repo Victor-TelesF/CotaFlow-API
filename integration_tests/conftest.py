@@ -12,42 +12,46 @@ from integration_tests.support import disposable_database_url, migrate
 
 @pytest.fixture
 def postgres_engine():
-    """Cria um schema aleatório por teste e o remove ao terminar, mesmo em erro.
+    """Cria um banco aleatório por teste e o remove ao terminar, mesmo em erro.
 
     Só acessa a conexão explicitamente autorizada pela configuração de teste.
-    Criação/remoção usam um engine sem pool; o engine do teste fixa search_path
-    no schema gerado e limita tempos de conexão, consulta e espera por lock.
+    O schema fixo cotaflow exige isolamento por banco, sem traduzir o schema
+    real dos modelos. A conexão administrativa também é explicitamente descartável.
     """
     url = disposable_database_url()
-    # Generated identifier, never caller-provided; only this schema is removed.
-    schema = f"ct_test_{uuid4().hex}"
+    # Generated identifier, never caller-provided; only this database is removed.
+    database = f"cotaflow_test_{uuid4().hex}"
     admin = create_engine(
         url,
         poolclass=NullPool,
         hide_parameters=True,
         connect_args={"connect_timeout": 5},
+        isolation_level="AUTOCOMMIT",
     )
     engine = None
+    created = False
     try:
         with admin.begin() as connection:
-            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            connection.execute(text(f'CREATE DATABASE "{database}"'))
+            created = True
         engine = create_engine(
-            url,
+            url.set(database=database),
             hide_parameters=True,
             connect_args={
                 "connect_timeout": 5,
-                "options": f"-csearch_path={schema} -cstatement_timeout=10000 -clock_timeout=3000",
+                "options": "-cstatement_timeout=10000 -clock_timeout=3000",
             },
         )
         with engine.connect() as connection:
-            assert connection.scalar(text("SELECT current_schema()")) == schema
+            assert connection.scalar(text("SELECT current_database()")) == database
         yield engine
     finally:
         if engine is not None:
             engine.dispose()
         try:
-            with admin.begin() as connection:
-                connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+            if created:
+                with admin.begin() as connection:
+                    connection.execute(text(f'DROP DATABASE IF EXISTS "{database}"'))
         finally:
             admin.dispose()
 
