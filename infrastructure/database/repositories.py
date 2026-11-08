@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from application.exceptions import EmailAlreadyRegistered
+from application.exceptions import AssetAlreadyRegistered, EmailAlreadyRegistered
 from application.types import User
 from domain.assets import Asset
 from domain.portfolio import Transaction
@@ -55,6 +55,15 @@ class SqlAlchemyUserRepository:
         row = self._session.scalar(select(UserModel).where(UserModel.email == email))
         return to_user(row) if row is not None else None
 
+    def lock(self, user_id: UUID) -> bool:
+        """SELECT FOR UPDATE protege toda a decisão de saldo na transação atual."""
+        return (
+            self._session.scalar(
+                select(UserModel.id).where(UserModel.id == user_id).with_for_update()
+            )
+            is not None
+        )
+
 
 class SqlAlchemyAssetRepository:
     """Persiste o catálogo validado pelo domínio, sem consultar cotações."""
@@ -70,12 +79,29 @@ class SqlAlchemyAssetRepository:
                 ticker=asset.ticker, name=asset.name, asset_type=asset.asset_type.value
             )
         )
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as error:
+            original = error.orig
+            if (
+                getattr(original, "sqlstate", None) == "23505"
+                and getattr(getattr(original, "diag", None), "constraint_name", None)
+                == "assets_pkey"
+            ):
+                raise AssetAlreadyRegistered from None
+            raise
 
     def get(self, ticker: str) -> Asset | None:
         """Busca o ticker canônico exato; não faz pesquisa em provedor externo."""
         row = self._session.get(AssetModel, ticker)
         return to_asset(row) if row is not None else None
+
+    def list_page(self, limit: int, offset: int) -> list[Asset]:
+        """Pagina no banco em ordem estável de ticker."""
+        rows = self._session.scalars(
+            select(AssetModel).order_by(AssetModel.ticker).limit(limit).offset(offset)
+        )
+        return [to_asset(row) for row in rows]
 
 
 class SqlAlchemyTransactionRepository:
@@ -123,5 +149,17 @@ class SqlAlchemyTransactionRepository:
             .join(AssetModel, TransactionModel.asset_ticker == AssetModel.ticker)
             .where(TransactionModel.user_id == user_id)
             .order_by(TransactionModel.transaction_date, TransactionModel.sequence)
+        )
+        return [to_transaction(transaction, asset) for transaction, asset in rows]
+
+    def list_page(self, user_id: UUID, limit: int, offset: int) -> list[Transaction]:
+        """Filtra o dono antes de paginar; carrega cada ativo no mesmo SELECT."""
+        rows = self._session.execute(
+            select(TransactionModel, AssetModel)
+            .join(AssetModel, TransactionModel.asset_ticker == AssetModel.ticker)
+            .where(TransactionModel.user_id == user_id)
+            .order_by(TransactionModel.transaction_date, TransactionModel.sequence)
+            .limit(limit)
+            .offset(offset)
         )
         return [to_transaction(transaction, asset) for transaction, asset in rows]
