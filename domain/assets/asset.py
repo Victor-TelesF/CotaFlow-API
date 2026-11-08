@@ -1,4 +1,8 @@
-"""Catalog identity; operation and market prices are separate inputs."""
+"""Identidade de uma ação brasileira ou FII, independente de banco e HTTP.
+
+Preço da operação pertence à transação; preço atual é uma entrada da avaliação.
+O cadastro de ativo não armazena nenhum desses preços ou uma posição do usuário.
+"""
 
 from dataclasses import dataclass
 
@@ -8,11 +12,19 @@ from ..exceptions import InvalidValueError
 
 @dataclass(frozen=True)
 class Asset:
+    """Ativo imutável com nome, ticker normalizado e tipo stock/fii.
+
+    Remove espaços das pontas e converte ticker para maiúsculas. Exige strings
+    não vazias e um AssetType, mas não consulta a B3 ou valida a existência
+    real do símbolo em um provedor de mercado.
+    """
+
     name: str
     ticker: str
     asset_type: AssetType
 
     def __post_init__(self) -> None:
+        """Valida os campos e normaliza a identidade antes de torná-la disponível."""
         if not isinstance(self.name, str) or not self.name.strip():
             raise InvalidValueError("Nome deve ser uma string não vazia")
         if not isinstance(self.ticker, str) or not self.ticker.strip():
