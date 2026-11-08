@@ -36,7 +36,7 @@ jobs:
       - name: Lint e formatação
         run: |
           uv run --locked ruff check .
-          uv run --locked ruff format --check domain application infrastructure presentation main.py tests integration_tests alembic
+          uv run --locked ruff format --check domain application infrastructure presentation main.py tests integration_tests runtime_tests alembic
       - name: Testes locais e integração PostgreSQL
         run: uv run --locked python -m pytest tests integration_tests -q --tb=short
       - name: Validar Compose com configuração fictícia
@@ -53,7 +53,12 @@ jobs:
           root = Path("/app")
           assert os.getuid() == 1000
           assert not any(root.glob(".env*"))
-          assert all(not (root / name).exists() for name in ("docs", "AGENTS.md", ".git", "tests", "integration_tests"))
+          assert all(not (root / name).exists() for name in ("docs", "AGENTS.md", ".git", "tests", "integration_tests", "runtime_tests"))
           assert all(importlib.util.find_spec(name) is None for name in ("pytest", "pytest_cov", "ruff"))
           assert not hasattr(main.app.state, "uow_factory")
           '
+      - name: Validar migrations e inicialização da imagem
+        env:
+          TEST_RUNTIME_IMAGE: cotaflow-api:ci
+          TEST_RUNTIME_DATABASE_CONTAINER: ${{ job.services.postgres.id }}
+        run: uv run --locked python -m pytest runtime_tests -q --tb=short
