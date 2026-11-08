@@ -10,6 +10,13 @@ from ..enums import AssetType
 from ..exceptions import InvalidValueError
 
 
+def normalize_ticker(ticker: str) -> str:
+    """Normaliza a identidade local sem certificar sua existência na bolsa."""
+    if not isinstance(ticker, str) or not ticker.strip():
+        raise InvalidValueError("Ticker deve ser uma string não vazia")
+    return ticker.strip().upper()
+
+
 @dataclass(frozen=True)
 class Asset:
     """Ativo imutável com nome, ticker normalizado e tipo stock/fii.
@@ -27,9 +34,7 @@ class Asset:
         """Valida os campos e normaliza a identidade antes de torná-la disponível."""
         if not isinstance(self.name, str) or not self.name.strip():
             raise InvalidValueError("Nome deve ser uma string não vazia")
-        if not isinstance(self.ticker, str) or not self.ticker.strip():
-            raise InvalidValueError("Ticker deve ser uma string não vazia")
         if not isinstance(self.asset_type, AssetType):
             raise InvalidValueError("Tipo de ativo deve ser stock ou fii")
         object.__setattr__(self, "name", self.name.strip())
-        object.__setattr__(self, "ticker", self.ticker.strip().upper())
+        object.__setattr__(self, "ticker", normalize_ticker(self.ticker))
