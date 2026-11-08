@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from application.types import User
-from infrastructure.config import Settings
+from infrastructure.config import MarketSettings, Settings
 from main import create_app
 from presentation.http.dependencies import CurrentUser
 from presentation.http.schemas.auth import RegisterRequest
@@ -22,6 +22,7 @@ def auth_app(security_settings):
             DB_PASSWORD="synthetic-password",
         ),
         security_settings,
+        MarketSettings(_env_file=None),
     )
 
     @app.get("/test-identity")

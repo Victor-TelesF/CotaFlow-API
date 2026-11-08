@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from infrastructure.config import Settings
+from infrastructure.config import MarketSettings, Settings
 from main import create_app
 
 
@@ -47,7 +47,7 @@ def test_healthcheck_and_openapi_without_database_access(security_settings):
         DB_USER="synthetic_user",
         DB_PASSWORD="synthetic-test-password",
     )
-    app = create_app(settings, security_settings)
+    app = create_app(settings, security_settings, MarketSettings(_env_file=None))
     with TestClient(app) as client:
         response = client.get("/health")
         assert response.status_code == 200
@@ -56,5 +56,9 @@ def test_healthcheck_and_openapi_without_database_access(security_settings):
             "/health",
             "/api/v1/auth/register",
             "/api/v1/auth/login",
+            "/api/v1/assets",
+            "/api/v1/portfolio/transactions",
+            "/api/v1/portfolio/positions",
+            "/api/v1/portfolio/valuation",
         }
     assert not hasattr(app.state, "uow_factory")
