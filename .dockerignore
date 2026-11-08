@@ -19,3 +19,30 @@ dist
 .DS_Store
 *.log
 *.sqlite*
+
+# Instruções e documentos locais; não publicar nem incluir no build.
+AGENTS.md
+agents.md
+/docs/
+/plano-*.md
+
+# Credenciais, chaves privadas e cópias de dados.
+.aws/
+.ssh/
+.secrets/
+secrets/
+credentials/
+.netrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials*.json
+*service-account*.json
+backups/
+dumps/
+*.dump
+*.backup
+*.sql.gz
