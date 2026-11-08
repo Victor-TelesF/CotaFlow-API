@@ -8,6 +8,8 @@ services:
       DB_NAME: ${DB_NAME:?Defina DB_NAME no .env}
       DB_USER: ${DB_USER:?Defina DB_USER no .env}
       DB_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD no .env}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Defina uma chave aleatoria JWT_SECRET_KEY no .env}
+      JWT_ACCESS_TOKEN_MINUTES: ${JWT_ACCESS_TOKEN_MINUTES:-30}
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     volumes:
