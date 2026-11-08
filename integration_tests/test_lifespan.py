@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from infrastructure.config import SecuritySettings, Settings
+from infrastructure.config import MarketSettings, SecuritySettings, Settings
 from main import create_app
 
 
@@ -23,17 +23,25 @@ def test_application_shutdown_closes_real_pool_connections(postgres_engine, exit
             _env_file=None,
             JWT_SECRET_KEY="synthetic-lifespan-key-with-at-least-32-characters",
         ),
+        MarketSettings(_env_file=None),
     )
     backend_pid = None
+    market_client = None
 
     def run():
-        nonlocal backend_pid
+        nonlocal backend_pid, market_client
         with TestClient(app) as client:
+            market_client = app.state.quotes._provider._client
+            assert not market_client.is_closed
             assert client.get("/health").json() == {"status": "ok"}
             assert set(client.get("/openapi.json").json()["paths"]) == {
                 "/health",
                 "/api/v1/auth/register",
                 "/api/v1/auth/login",
+                "/api/v1/assets",
+                "/api/v1/portfolio/transactions",
+                "/api/v1/portfolio/positions",
+                "/api/v1/portfolio/valuation",
             }
             with app.state.uow_factory() as uow:
                 backend_pid = uow._session.scalar(text("SELECT pg_backend_pid()"))
@@ -56,6 +64,8 @@ def test_application_shutdown_closes_real_pool_connections(postgres_engine, exit
     else:
         run()
     assert backend_pid is not None
+    assert market_client.is_closed
+    assert not hasattr(app.state, "quotes")
     assert not hasattr(app.state, "uow_factory")
     with postgres_engine.connect() as connection:
         assert (

@@ -11,7 +11,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import event, func, select, text
 from sqlalchemy.exc import IntegrityError
 
-from infrastructure.config import SecuritySettings, Settings
+from infrastructure.config import MarketSettings, SecuritySettings, Settings
 from infrastructure.database.models import UserModel
 from infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from main import create_app
@@ -32,6 +32,7 @@ def auth_client(session_factory):
             _env_file=None,
             JWT_SECRET_KEY="synthetic-integration-key-at-least-32-characters",
         ),
+        MarketSettings(_env_file=None),
     )
 
     @app.get("/test-identity")
