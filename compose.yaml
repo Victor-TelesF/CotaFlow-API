@@ -1,19 +1,38 @@
+x-database-environment: &database-environment
+  DB_DRIVER: ${DB_DRIVER:-postgresql+psycopg}
+  DB_HOST: db
+  DB_PORT: "5432"
+  DB_NAME: ${DB_NAME:?Defina DB_NAME no .env}
+  DB_USER: ${DB_USER:?Defina DB_USER no .env}
+  DB_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD no .env}
+
 services:
   api:
     build: .
+    image: cotaflow-api:local
     environment:
-      DB_DRIVER: ${DB_DRIVER:-postgresql+psycopg}
-      DB_HOST: db
-      DB_PORT: "5432"
-      DB_NAME: ${DB_NAME:?Defina DB_NAME no .env}
-      DB_USER: ${DB_USER:?Defina DB_USER no .env}
-      DB_PASSWORD: ${DB_PASSWORD:?Defina DB_PASSWORD no .env}
+      <<: *database-environment
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Defina uma chave aleatoria JWT_SECRET_KEY no .env}
       JWT_ACCESS_TOKEN_MINUTES: ${JWT_ACCESS_TOKEN_MINUTES:-30}
+      BRAPI_TOKEN: ${BRAPI_TOKEN:-}
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
-    volumes:
-      - ./alembic:/app/alembic
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      db:
+        condition: service_healthy
+
+  migrate:
+    build: .
+    image: cotaflow-api:local
+    profiles: ["tools"]
+    command: ["alembic", "upgrade", "head"]
+    environment: *database-environment
     depends_on:
       db:
         condition: service_healthy
