@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import event, func, insert, select
 from sqlalchemy.exc import DataError, IntegrityError, InvalidRequestError
 
-from application.exceptions import EmailAlreadyRegistered
+from application.exceptions import AssetAlreadyRegistered, EmailAlreadyRegistered
 from application.types import User
 from domain.assets import Asset
 from domain.enums import AssetType, TransactionType
@@ -247,7 +247,9 @@ def test_uniqueness_rejects_duplicates_without_deleting_original(
     session_factory, resource
 ):
     user, asset = seed(session_factory)
-    expected_error = EmailAlreadyRegistered if resource == "email" else IntegrityError
+    expected_error = (
+        EmailAlreadyRegistered if resource == "email" else AssetAlreadyRegistered
+    )
     with (
         pytest.raises(expected_error) as caught,
         SqlAlchemyUnitOfWork(session_factory) as uow,
@@ -257,12 +259,7 @@ def test_uniqueness_rejects_duplicates_without_deleting_original(
         else:
             uow.assets.add(Asset("Other", "test3", AssetType.FII))
         uow.commit()
-    if resource == "ticker":
-        assert caught.value.orig.diag.constraint_name == "assets_pkey"
-    # SQLAlchemy hides bound parameters; PostgreSQL's own DETAIL may still
-    # include conflicting values. HTTP translation must not expose raw errors.
-    if resource == "ticker":
-        assert caught.value.hide_parameters
+    # The exact known uniqueness constraints now have safe application errors.
     assert "synthetic-other-hash" not in str(caught.value)
     with SqlAlchemyUnitOfWork(session_factory) as uow:
         assert uow.users.get(user.id) == user
@@ -302,3 +299,19 @@ def test_history_is_loaded_in_one_query_and_retains_decimal_precision(session_fa
     assert len(history) == 3
     assert all(tx.quantity == Decimal("0.00000001") for tx in history)
     assert all(tx.price == Decimal("9999999999.99999999") for tx in history)
+
+
+def test_raw_ticker_uniqueness_constraint_preserves_original_asset(session_factory):
+    """Mantém evidência da constraint exata além da tradução feita pelo repositório."""
+    _, asset = seed(session_factory)
+    with pytest.raises(IntegrityError) as caught, session_factory.begin() as session:
+        session.execute(
+            insert(AssetModel).values(
+                ticker=asset.ticker, name="Changed", asset_type="fii"
+            )
+        )
+    assert caught.value.orig.sqlstate == "23505"
+    assert caught.value.orig.diag.constraint_name == "assets_pkey"
+    assert caught.value.hide_parameters
+    with SqlAlchemyUnitOfWork(session_factory) as uow:
+        assert uow.assets.get(asset.ticker) == asset
