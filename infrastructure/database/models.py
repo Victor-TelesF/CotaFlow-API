@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Identity,
     Index,
+    MetaData,
     Numeric,
     Text,
     UniqueConstraint,
@@ -29,9 +30,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+DATABASE_SCHEMA = "cotaflow"
+
 
 class Base(DeclarativeBase):
     """Registro de metadados compartilhado pelos modelos e pelo Alembic."""
+
+    metadata = MetaData(schema=DATABASE_SCHEMA)
 
 
 class UserModel(Base):
