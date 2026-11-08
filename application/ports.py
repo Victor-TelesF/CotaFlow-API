@@ -9,7 +9,7 @@ from types import TracebackType
 from typing import Protocol, Self
 from uuid import UUID
 
-from application.types import User
+from application.types import Quote, User
 from domain.assets import Asset
 from domain.portfolio import Transaction
 
@@ -29,6 +29,10 @@ class UserRepository(Protocol):
         """Retorna a identidade pelo email normalizado ou None."""
         ...
 
+    def lock(self, user_id: UUID) -> bool:
+        """Bloqueia a linha até o fim da UoW; False se a identidade não existir."""
+        ...
+
 
 class AssetRepository(Protocol):
     """Armazena o catálogo local, sem posição financeira ou preços de mercado."""
@@ -41,6 +45,10 @@ class AssetRepository(Protocol):
         """Consulta o ticker canônico exato; ausência resulta em None."""
         ...
 
+    def list_page(self, limit: int, offset: int) -> list[Asset]:
+        """Página ordenada pelo ticker canônico."""
+        ...
+
 
 class TransactionRepository(Protocol):
     """Persiste operações e fornece o histórico completo para reconstrução."""
@@ -51,6 +59,10 @@ class TransactionRepository(Protocol):
 
     def list_for_user(self, user_id: UUID) -> list[Transaction]:
         """Retorna somente o histórico do usuário, ordenado por data/sequência."""
+        ...
+
+    def list_page(self, user_id: UUID, limit: int, offset: int) -> list[Transaction]:
+        """Página do dono, por data e sequência crescentes, sem truncar cálculos."""
         ...
 
 
@@ -105,4 +117,12 @@ class TokenService(Protocol):
 
     def verify(self, token: str) -> UUID:
         """Retorna UUID validado ou levanta InvalidToken sem revelar o token."""
+        ...
+
+
+class QuoteProvider(Protocol):
+    """Obtém uma fotografia completa ou levanta QuotesUnavailable."""
+
+    def get_quotes(self, tickers: set[str]) -> dict[str, Quote]:
+        """Sem preços inventados, vencidos ou totais parciais."""
         ...
