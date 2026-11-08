@@ -8,6 +8,23 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: cotaflow_test_ci
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: synthetic-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test_user -d cotaflow_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_DISPOSABLE: "1"
+      TEST_DATABASE_URL: postgresql+psycopg://test_user:synthetic-test-password@127.0.0.1:5432/cotaflow_test_ci
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v7
@@ -16,9 +33,27 @@ jobs:
           python-version: "3.13"
       - name: Instalar dependências pelo lockfile
         run: uv sync --locked
-      - name: Validar Compose com configuração fictícia
+      - name: Lint e formatação
         run: |
-          cp .env.example .env
-          docker compose config --quiet
+          uv run --locked ruff check .
+          uv run --locked ruff format --check domain application infrastructure presentation main.py tests integration_tests alembic
+      - name: Testes locais e integração PostgreSQL
+        run: uv run --locked python -m pytest tests integration_tests -q --tb=short
+      - name: Validar Compose com configuração fictícia
+        run: docker compose --env-file .env.example --profile tools config --quiet
       - name: Construir imagem
-        run: docker compose build
+        run: docker build --tag cotaflow-api:ci .
+      - name: Conferir artefato de execução sem rede
+        run: |
+          docker run --rm --network none --entrypoint python cotaflow-api:ci -c '
+          import importlib.util
+          import os
+          from pathlib import Path
+          import main
+          root = Path("/app")
+          assert os.getuid() == 1000
+          assert not any(root.glob(".env*"))
+          assert all(not (root / name).exists() for name in ("docs", "AGENTS.md", ".git", "tests", "integration_tests"))
+          assert all(importlib.util.find_spec(name) is None for name in ("pytest", "pytest_cov", "ruff"))
+          assert not hasattr(main.app.state, "uow_factory")
+          '
