@@ -16,8 +16,13 @@ RUN --mount=type=secret,id=proxy_ca \
     if [ -f /run/secrets/proxy_ca ]; then export SSL_CERT_FILE=/run/secrets/proxy_ca; fi; \
     uv sync --locked --no-dev --no-cache && useradd --create-home --uid 1000 app
 
-COPY --chown=app:app . .
+COPY --chown=app:app main.py alembic.ini ./
+COPY --chown=app:app domain/ domain/
+COPY --chown=app:app application/ application/
+COPY --chown=app:app infrastructure/ infrastructure/
+COPY --chown=app:app presentation/ presentation/
+COPY --chown=app:app alembic/ alembic/
 
 USER app
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
