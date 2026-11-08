@@ -1,7 +1,7 @@
 [project]
-name = "python-api-template"
+name = "cotaflow-api"
 version = "0.1.0"
-description = "Base mínima para APIs Python com FastAPI e SQLAlchemy"
+description = "API de carteira de ações brasileiras e FIIs com cotações automáticas"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -11,7 +11,24 @@ dependencies = [
     "alembic>=1.20.1,<2",
     "pydantic-settings>=2.16.2,<3",
     "psycopg[binary]>=3.3.8,<4",
+    "pydantic[email]>=2.14.3,<3.0.0",
+    "pyjwt>=2.15.1,<3.0.0",
+    "pwdlib[argon2]>=0.3.1,<0.4.0",
+    "httpx2>=2.16.0,<3.0.0",
 ]
 
 [tool.uv]
 package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0,<10.0.0",
+    "pytest-cov>=7.1.0,<8.0.0",
+    "ruff>=0.17.4,<0.18.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = ["docs"]
