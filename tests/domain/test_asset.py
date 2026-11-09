@@ -41,3 +41,24 @@ def test_catalog_identity_cannot_change_after_an_operation(petr4):
     with pytest.raises(FrozenInstanceError):
         petr4.ticker = "OTHER3"
     assert petr4.ticker == "PETR4"
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    ["TEST3/OTHER3", "A" * 21, "A" * 65, "TEST3?x", "á3", "A B", "\t" * 65 + "A"],
+)
+def test_ticker_rejects_unsafe_or_unbounded_input(ticker):
+    with pytest.raises(InvalidValueError):
+        Asset("Synthetic", ticker, AssetType.STOCK)
+
+
+@pytest.mark.parametrize("name", ["a" * 121, " " * 256 + "A", "\t\n"])
+def test_asset_name_limits_raw_and_normalized_input(name):
+    with pytest.raises(InvalidValueError):
+        Asset(name, "TEST3", AssetType.STOCK)
+
+
+def test_identity_accepts_exact_normalized_and_raw_limits():
+    asset = Asset(" " * 136 + "a" * 120, " " * 44 + "a" * 20, AssetType.STOCK)
+    assert asset.name == "a" * 120
+    assert asset.ticker == "A" * 20
