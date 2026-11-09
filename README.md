@@ -41,3 +41,7 @@ O histórico preserva os valores de cada operação. O resultado apresentado com
 O CotaFlow é um projeto de portfólio voltado ao desenvolvimento backend com Python. Seu escopo atual reúne ações brasileiras e FIIs em BRL, com uma carteira por usuário e acompanhamento das operações informadas por ele.
 
 As funcionalidades principais estão implementadas. O projeto segue em revisão e validação para publicação das melhorias; a integração com um frontend está prevista.
+
+## Licença
+
+Distribuído sob a [licença MIT](LICENSE).
