@@ -9,10 +9,16 @@ from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, field_serializer
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_serializer
 
 from application.types import PortfolioValuation
+from domain.assets.asset import (
+    MAX_RAW_TICKER,
+    TICKER_PATTERN,
+    normalize_ticker,
+)
 from domain.enums import AssetType, TransactionType
+from domain.exceptions import InvalidValueError
 from domain.portfolio import Portfolio, Position, Transaction
 
 
@@ -32,13 +38,23 @@ DecimalInput = Annotated[
 ]
 
 
-class AssetRequest(BaseModel):
-    """Cadastro local de ativo; tipo e campos extras são verificados aqui."""
+def ticker_input(value: object) -> str:
+    try:
+        return normalize_ticker(value)
+    except InvalidValueError:
+        raise ValueError("Invalid ticker") from None
 
-    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    ticker: str
-    name: str
-    type: AssetType
+
+TickerInput = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=20,
+        pattern=f"^{TICKER_PATTERN}$",
+        description=f"Normalized ASCII ticker; raw input at most {MAX_RAW_TICKER} characters",
+    ),
+    BeforeValidator(ticker_input),
+]
 
 
 class AssetResponse(BaseModel):
@@ -61,7 +77,7 @@ class TransactionRequest(BaseModel):
     """Dono vem exclusivamente do Bearer; não há user_id na entrada."""
 
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
-    ticker: str
+    ticker: TickerInput
     quantity: DecimalInput
     price: DecimalInput
     type: TransactionType
@@ -69,10 +85,9 @@ class TransactionRequest(BaseModel):
 
 
 class TransactionResponse(BaseModel):
-    """Fatos persistidos; valores exatos saem como strings com oito casas."""
+    """Fatos com UUID público; o desempate interno não integra a resposta."""
 
     id: UUID
-    sequence: int
     ticker: str
     quantity: Decimal
     price: Decimal
@@ -89,7 +104,6 @@ class TransactionResponse(BaseModel):
         """Conversão única da operação para seu contrato público."""
         return cls(
             id=transaction.id_transaction,
-            sequence=transaction.transaction_sequence,
             ticker=transaction.asset.ticker,
             quantity=transaction.quantity,
             price=transaction.price,
@@ -99,7 +113,7 @@ class TransactionResponse(BaseModel):
 
 
 class TransactionPage(BaseModel):
-    """Histórico do dono por data/sequência crescentes, inclusive ciclos zerados."""
+    """Histórico por data e ordem estável de registro, inclusive ciclos zerados."""
 
     items: list[TransactionResponse]
     limit: int

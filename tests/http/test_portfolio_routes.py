@@ -26,7 +26,6 @@ def validation_client():
     "method,path",
     [
         ("get", "/api/v1/assets"),
-        ("post", "/api/v1/assets"),
         ("get", "/api/v1/portfolio/transactions"),
         ("post", "/api/v1/portfolio/transactions"),
         ("get", "/api/v1/portfolio/positions"),
@@ -71,7 +70,9 @@ def test_invalid_transaction_shape_is_safe_422(validation_client, field, value):
 
 
 @pytest.mark.parametrize("path", ["/api/v1/assets", "/api/v1/portfolio/transactions"])
-@pytest.mark.parametrize("query", ["limit=0", "limit=101", "offset=-1"])
+@pytest.mark.parametrize(
+    "query", ["limit=0", "limit=101", "offset=-1", "offset=10001", f"offset={2**100}"]
+)
 def test_pagination_is_bounded(validation_client, path, query):
     response = validation_client.get(f"{path}?{query}")
     assert response.status_code == 422
@@ -82,3 +83,33 @@ def test_decimal_input_openapi_documents_strings():
     schema = create_app().openapi()["components"]["schemas"]["TransactionRequest"]
     assert schema["properties"]["quantity"]["type"] == "string"
     assert schema["properties"]["price"]["type"] == "string"
+
+
+def test_public_transaction_schema_exposes_facts_without_internal_sequence():
+    schema = create_app().openapi()
+    transaction = schema["components"]["schemas"]["TransactionResponse"]
+    expected = {"id", "ticker", "quantity", "price", "type", "date"}
+    assert set(transaction["properties"]) == expected
+    assert set(transaction["required"]) == expected
+    operations = schema["paths"]["/api/v1/portfolio/transactions"]
+    assert operations["post"]["responses"]["201"]["content"]["application/json"][
+        "schema"
+    ] == {"$ref": "#/components/schemas/TransactionResponse"}
+    assert schema["components"]["schemas"]["TransactionPage"]["properties"]["items"][
+        "items"
+    ] == {"$ref": "#/components/schemas/TransactionResponse"}
+
+
+@pytest.mark.parametrize("path", ["/api/v1/assets", "/api/v1/portfolio/transactions"])
+def test_excessive_offset_precedes_even_identity_lookup(path):
+    app = create_app()
+
+    def forbidden_identity():
+        pytest.fail("Excessive offset reached identity dependency")
+
+    app.dependency_overrides[get_current_user] = forbidden_identity
+    response = TestClient(app).get(f"{path}?offset=10001")
+    assert response.status_code == 422
+    assert response.json()["details"] == [
+        {"location": ["query", "offset"], "type": "less_than_equal"}
+    ]
