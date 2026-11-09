@@ -4,7 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from threading import Event, Lock
+from threading import Event
 
 import httpx2
 import pytest
@@ -92,13 +92,16 @@ def test_exact_decimal_and_metadata_without_token_in_url(market):
         {"regularMarketTime": 1794087160},
     ],
 )
-def test_invalid_quote_is_not_cached_and_recovery_fetches_again(market, changes):
-    _, calls, reply, _, cache = market
+def test_invalid_quote_never_becomes_price_and_recovery_after_negative_ttl(
+    market, changes
+):
+    seconds, calls, reply, _, cache = market
     reply[0] = lambda request: httpx2.Response(200, content=body(**changes))
     with pytest.raises(QuotesUnavailable) as error:
         cache.get_quotes({"TEST3"})
     assert error.value.reason == "invalid_response"
     assert error.value.tickers == ("TEST3",)
+    seconds[0] += 5
     reply[0] = lambda request: httpx2.Response(200, content=body())
     assert cache.get_quotes({"TEST3"})["TEST3"].price == Decimal(42)
     assert len(calls) == 2
@@ -142,7 +145,7 @@ def test_absent_quote_time_is_explicitly_null(market):
     [
         (401, "authentication"),
         (403, "authentication"),
-        (404, "unavailable"),
+        (404, "not_found"),
         (500, "unavailable"),
         (503, "unavailable"),
         (302, "unavailable"),
@@ -170,7 +173,7 @@ def test_http_failures_are_safe_without_retry_or_redirect(market, status, reason
         (httpx2.ConnectError, "unavailable"),
     ],
 )
-def test_transport_failure_does_not_turn_into_zero_or_cached_failure(
+def test_transport_failure_is_reused_without_price_or_repeated_http(
     market, exception, reason
 ):
     _, calls, reply, _, cache = market
@@ -184,7 +187,7 @@ def test_transport_failure_does_not_turn_into_zero_or_cached_failure(
             cache.get_quotes({"TEST3"})
         assert error.value.reason == reason
         assert "synthetic-secret" not in str(error.value)
-    assert len(calls) == 2
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -243,22 +246,24 @@ def test_stale_cache_does_not_hide_provider_failure(market):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("delay", [120, 172800])
-def test_rate_limit_honors_cooldown_and_keeps_valid_hits_available(market, delay):
+@pytest.mark.parametrize("delay,expected", [(120, 120), (172800, 3600)])
+def test_rate_limit_honors_cooldown_and_keeps_valid_hits_available(
+    market, delay, expected
+):
     seconds, calls, reply, _, cache = market
     cache.get_quotes({"FUND11"})
     reply[0] = lambda request: httpx2.Response(429, headers={"Retry-After": str(delay)})
     with pytest.raises(QuotesUnavailable) as error:
         cache.get_quotes({"TEST3", "FUND11"})
     assert error.value.tickers == ("TEST3",)
-    assert error.value.retry_after == delay
+    assert error.value.retry_after == expected
     assert cache.get_quotes({"FUND11"})["FUND11"].cached
     seconds[0] += 20
     with pytest.raises(QuotesUnavailable) as cooldown:
         cache.get_quotes({"OTHER3"})
-    assert cooldown.value.retry_after == delay - 20
+    assert cooldown.value.retry_after == expected - 20
     assert len(calls) == 2
-    seconds[0] += delay - 20
+    seconds[0] += expected - 20
     reply[0] = lambda request: httpx2.Response(200, content=body())
     assert not cache.get_quotes({"TEST3"})["TEST3"].cached
     assert len(calls) == 3
@@ -269,14 +274,53 @@ def test_rate_limit_honors_cooldown_and_keeps_valid_hits_available(market, delay
     [
         (None, 60),
         ("bad", 60),
+        ("-120", 60),
         ("0", 1),
+        ("1", 1),
         ("120", 120),
+        ("3600", 3600),
+        ("3601", 3600),
         ("Sun, 08 Nov 2026 00:02:00 GMT", 120),
-        ("999999999", 999999999),
+        ("Sat, 07 Nov 2026 23:59:00 GMT", 1),
+        ("Sun, 08 Nov 2026 01:00:00 GMT", 3600),
+        ("Sun, 08 Nov 2026 01:00:01 GMT", 3600),
+        ("Fri, 31 Dec 9999 23:59:59 GMT", 3600),
+        ("999999999", 3600),
+        ("9" * 5000, 3600),
+        ("0" * 5000 + "120", 120),
     ],
 )
 def test_retry_after_seconds_http_date_and_invalid_text(value, expected):
     assert retry_delay(value, NOW) == expected
+
+
+@pytest.mark.parametrize(
+    "delay,expected", [(None, 60), (0, 1), (-1, 1), (999999999, 3600)]
+)
+def test_cache_bounds_provider_cooldown_without_relying_on_http_parser(delay, expected):
+    seconds = [1000.0]
+    attempts = []
+
+    class Provider:
+        def get_quote(self, ticker, deadline):
+            attempts.append(ticker)
+            raise QuotesUnavailable({ticker}, "rate_limited", delay)
+
+    cache = CachedQuotes(Provider(), clock=lambda: seconds[0])
+    with pytest.raises(QuotesUnavailable) as first:
+        cache.get_quotes({"TEST3"})
+    assert first.value.reason == "rate_limited"
+    assert first.value.retry_after == expected
+    seconds[0] += expected - 0.5
+    with pytest.raises(QuotesUnavailable) as blocked:
+        cache.get_quotes({"OTHER3"})
+    assert blocked.value.retry_after == 1
+    assert attempts == ["TEST3"]
+    seconds[0] += 0.5
+    with pytest.raises(QuotesUnavailable) as recovered:
+        cache.get_quotes({"OTHER3"})
+    assert recovered.value.retry_after == expected
+    assert attempts == ["TEST3", "OTHER3"]
 
 
 def test_one_deadline_for_entire_batch_and_no_late_quote_cached(market):
@@ -293,6 +337,7 @@ def test_one_deadline_for_entire_batch_and_no_late_quote_cached(market):
     assert error.value.tickers == ("BBB3", "CCC3")
     assert len(calls) == 2
     assert calls[1].extensions["timeout"]["read"] <= 1
+    seconds[0] += 5
     reply[0] = lambda request: httpx2.Response(200, content=body("BBB3"))
     assert not cache.get_quotes({"BBB3"})["BBB3"].cached
 
@@ -322,26 +367,20 @@ def test_stream_body_limit_and_deadline_close_response(market):
     assert large.value.reason == "invalid_response"
 
 
-def test_concurrent_cold_reads_share_real_lock_and_one_http_request(market):
+def test_concurrent_cold_reads_share_one_http_request(market):
     _, calls, reply, _, cache = market
-    entered, release, both_acquiring = Event(), Event(), Event()
-    count_lock = Lock()
-    real_lock = Lock()
-    attempts = [0]
+    entered, release, waiting = Event(), Event(), Event()
 
-    class ObservedLock:
-        # Instrumentação da entrada; o bloqueio continua sendo threading.Lock real.
-        def acquire(self, timeout):
-            with count_lock:
-                attempts[0] += 1
-                if attempts[0] == 2:
-                    both_acquiring.set()
-            return real_lock.acquire(timeout=timeout)
+    class ObservedEvent:
+        def __init__(self, real):
+            self.real = real
 
-        def release(self):
-            real_lock.release()
+        def wait(self, timeout):
+            waiting.set()
+            return self.real.wait(timeout)
 
-    cache._lock = ObservedLock()
+        def set(self):
+            self.real.set()
 
     def blocked(request):
         entered.set()
@@ -352,9 +391,12 @@ def test_concurrent_cold_reads_share_real_lock_and_one_http_request(market):
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(cache.get_quotes, {"TEST3"})
         assert entered.wait(5)
+        with cache._lock:
+            flight = cache._flights["TEST3"]
+            flight.done = ObservedEvent(flight.done)
         second = pool.submit(cache.get_quotes, {"TEST3"})
         try:
-            assert both_acquiring.wait(5)
+            assert waiting.wait(5)
             assert len(calls) == 1
             assert not first.done() and not second.done()
         finally:
@@ -363,16 +405,19 @@ def test_concurrent_cold_reads_share_real_lock_and_one_http_request(market):
     assert len(calls) == 1
     assert cold["TEST3"].price == warm["TEST3"].price == Decimal(42)
     assert not cold["TEST3"].cached and warm["TEST3"].cached
+    assert cache._flights == {}
 
 
-def test_waiting_for_busy_cache_has_a_bounded_timeout_without_http(market):
-    _, calls, _, provider, _ = market
-    cache = CachedQuotes(provider, budget=0.01)
-    cache._lock.acquire()
+def test_waiting_for_http_slot_has_bounded_timeout_without_http(market):
+    seconds, calls, _, provider, _ = market
+    cache = CachedQuotes(provider, budget=0.01, concurrency=1, clock=lambda: seconds[0])
+    cache._slots.acquire()
     try:
         with pytest.raises(QuotesUnavailable) as error:
             cache.get_quotes({"TEST3"})
     finally:
-        cache._lock.release()
+        cache._slots.release()
     assert error.value.reason == "timeout"
     assert calls == []
+    assert cache._flights == {}
+    assert cache.get_quotes({"TEST3"})["TEST3"].price == Decimal(42)
