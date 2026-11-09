@@ -18,21 +18,38 @@ import httpx2
 
 from application.exceptions import QuotesUnavailable
 from application.types import Quote
+from domain.assets.asset import TICKER_PATTERN
 
 MAX_BODY_BYTES = 65_536
+DEFAULT_RETRY_DELAY = 60
+MAX_RETRY_DELAY = 3600
+
+
+def bounded_retry_delay(seconds: int | None) -> int:
+    """Política compartilhada pelo parser e pela fronteira de cache/provider."""
+    return (
+        DEFAULT_RETRY_DELAY
+        if seconds is None
+        else max(1, min(MAX_RETRY_DELAY, seconds))
+    )
 
 
 def retry_delay(value: str | None, now: datetime) -> int:
-    """Respeita segundos ou HTTP-date, sem ecoar texto arbitrário em headers."""
+    """Limita segundos/HTTP-date a uma hora, sem ecoar texto em headers."""
     if value is not None:
         try:
-            seconds = int(value) if value.isascii() and value.isdigit() else None
-            if seconds is None:
+            if value.isascii() and value.isdigit():
+                # Bound before int(): untrusted headers may exceed Python's digit limit.
+                digits = value.lstrip("0")
+                if len(digits) > len(str(MAX_RETRY_DELAY)):
+                    return MAX_RETRY_DELAY
+                seconds = int(digits or "0")
+            else:
                 seconds = ceil((parsedate_to_datetime(value) - now).total_seconds())
-            return max(1, seconds)
+            return bounded_retry_delay(seconds)
         except (ValueError, TypeError, OverflowError):
             pass
-    return 60
+    return DEFAULT_RETRY_DELAY
 
 
 class BrapiQuotes:
@@ -56,7 +73,7 @@ class BrapiQuotes:
         O deadline impede iniciar outro ticker e rejeita respostas após o prazo.
         Cada chunk é conferido para impedir corpo lento ilimitado.
         """
-        if not re.fullmatch(r"[A-Z0-9]{1,20}", ticker):
+        if not re.fullmatch(TICKER_PATTERN, ticker):
             raise QuotesUnavailable({ticker}, "invalid_symbol")
         remaining = deadline - self._clock()
         if remaining <= 0:
@@ -76,6 +93,8 @@ class BrapiQuotes:
                     )
                 if response.status_code in {401, 403}:
                     raise QuotesUnavailable({ticker}, "authentication")
+                if response.status_code == 404:
+                    raise QuotesUnavailable({ticker}, "not_found")
                 if response.status_code != 200:
                     raise QuotesUnavailable({ticker})
                 body = bytearray()
