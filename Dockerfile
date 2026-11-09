@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM python:3.13.18-slim-trixie@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+FROM python:3.13.18-alpine3.24@sha256:1e1f6334529d1fb26a2ef619d7cffb30a7c7d7cc1cc7338ebee283a58d1aeaca
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff /uv /bin/uv
 
@@ -10,20 +10,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
-# Atualiza a biblioteca de compressão da base e remove instaladores Python sem
-# consumidor no runtime (incluindo dependências vendorizadas e ensurepip).
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends --only-upgrade zlib1g \
-    && rm -rf /var/lib/apt/lists/* \
+# A base Alpine reduz os componentes do SO; atualizações vêm do repositório oficial.
+RUN apk upgrade --no-cache \
     && python -m pip uninstall --yes pip \
     && rm -rf /usr/local/lib/python3.13/ensurepip
 COPY pyproject.toml uv.lock .python-version ./
 # CA opcional para builds em ambientes com proxy TLS.
 RUN --mount=type=secret,id=proxy_ca \
     if [ -f /run/secrets/proxy_ca ]; then export SSL_CERT_FILE=/run/secrets/proxy_ca; fi; \
-    uv sync --locked --no-dev --no-cache && useradd --create-home --uid 1000 app
+    uv sync --locked --no-dev --no-cache --no-build && adduser -D -u 1000 app
 
-COPY --chown=app:app main.py alembic.ini ./
+COPY --chown=app:app main.py alembic.ini LICENSE ./
 COPY --chown=app:app domain/ domain/
 COPY --chown=app:app application/ application/
 COPY --chown=app:app infrastructure/ infrastructure/
