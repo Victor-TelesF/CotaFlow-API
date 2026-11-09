@@ -1,47 +1,34 @@
 # CotaFlow API
 
-**Acompanhe posições, custo e valor de mercado da sua carteira de ações e FIIs.**
+API REST para registrar compras e vendas de ações brasileiras e FIIs e consultar carteiras em BRL. Cada conta tem seu próprio histórico, posições e avaliações; o catálogo de ativos disponível é compartilhado.
 
-API REST em Python para registrar compras e vendas de ativos brasileiros e acompanhar a evolução da carteira. Cada usuário tem acesso autenticado às próprias operações, posições e avaliações em reais.
+O serviço oferece cadastro e login com JWT, consulta paginada do catálogo e do histórico, registro de operações, cálculo de posições abertas e avaliação com cotações da brapi. As cotações são uma fotografia de mercado com cache e podem ter atraso; os preços e as datas informados nas operações permanecem no histórico.
 
-[Swagger UI](https://cotaflow-api.onrender.com/docs) · [OpenAPI](https://cotaflow-api.onrender.com/openapi.json) · [Healthcheck](https://cotaflow-api.onrender.com/health)
+## Comece a usar
 
-## Funcionalidades
+1. Crie uma conta em `POST /api/v1/auth/register` e obtenha um token em `POST /api/v1/auth/login`.
+2. Envie o token como `Authorization: Bearer <token>` nas rotas protegidas.
+3. Consulte `GET /api/v1/assets` para escolher um ativo disponível antes de registrar operações.
+4. Registre compras ou vendas em `POST /api/v1/portfolio/transactions`; depois consulte posições, avaliação e histórico.
 
-- **Cadastro e login:** acesso individual com autenticação JWT.
-- **Catálogo de ativos:** consulta de ações brasileiras e fundos imobiliários.
-- **Compras e vendas:** registro de quantidade, preço e data de cada operação.
-- **Posições consolidadas:** saldo disponível, preço médio e custo dos ativos em carteira.
-- **Avaliação de mercado:** cotações da brapi, valor atual e resultado não realizado.
-- **Histórico individual:** consulta paginada das operações de cada usuário.
+Leia o [guia de uso e referência de endpoints](API.md) para exemplos de requisição, respostas, autenticação, paginação e erros.
 
-O fluxo de uso é **cadastro → login → consulta ao catálogo → compra → posições → avaliação → venda → histórico**.
+## Acesso
 
-## Um exemplo prático
-
-Duas compras de **10 unidades a R$ 30** e **10 a R$ 40**, seguidas de uma venda de **5 unidades**, deixam a posição abaixo. Com uma cotação ilustrativa de **R$ 42**:
-
-| Quantidade | Preço médio | Custo aberto | Valor de mercado | Resultado não realizado |
-| ---: | ---: | ---: | ---: | ---: |
-| 15 | R$ 35,00 | R$ 525,00 | R$ 630,00 | +R$ 105,00 (+20%) |
-
-O histórico preserva os valores de cada operação. O resultado apresentado compara o valor de mercado com o custo da posição que permanece em carteira.
+- [Swagger interativo](https://cotaflow-api.onrender.com/docs)
+- [Especificação OpenAPI](https://cotaflow-api.onrender.com/openapi.json)
+- [Healthcheck](https://cotaflow-api.onrender.com/health)
+- [Frontend](https://cota-flow-web.vercel.app)
 
 ## Tecnologias
 
 | Área | Tecnologias |
 | --- | --- |
-| API | Python 3.13, FastAPI, Pydantic |
-| Banco de dados | PostgreSQL, SQLAlchemy, Alembic, Psycopg |
-| Autenticação e cotações | PyJWT, Argon2, HTTPX2, brapi |
-| Desenvolvimento e entrega | uv, pytest, Ruff, Docker, GitHub Actions, Render |
+| API | Python 3.13 · FastAPI 0.162.0 · Pydantic |
+| Banco de dados | PostgreSQL 17 · SQLAlchemy · Alembic · Psycopg |
+| Segurança e cotações | PyJWT · Argon2 · HTTPX2 · brapi |
+| Desenvolvimento e entrega | uv · pytest · Ruff · Docker Compose · GitHub Actions · Render |
 
-## Sobre o projeto
+Projeto de portfólio voltado a APIs backend para controle de carteira. O catálogo inicial e a validação operacional da hospedagem seguem em evolução; consulte o Swagger para o contrato publicado no ambiente.
 
-O CotaFlow é um projeto de portfólio voltado ao desenvolvimento backend com Python. Seu escopo atual reúne ações brasileiras e FIIs em BRL, com uma carteira por usuário e acompanhamento das operações informadas por ele.
-
-As funcionalidades principais estão implementadas. O projeto segue em revisão e validação para publicação das melhorias; a integração com um frontend está prevista.
-
-## Licença
-
-Distribuído sob a [licença MIT](LICENSE).
+Licença [MIT](LICENSE).
