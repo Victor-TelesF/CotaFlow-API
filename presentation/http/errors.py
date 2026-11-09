@@ -7,21 +7,77 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from application.exceptions import (
     AssetAlreadyRegistered,
+    AuthenticationLimited,
     CatalogAssetNotFound,
     EmailAlreadyRegistered,
     InvalidCredentials,
     InvalidToken,
     QuotesUnavailable,
+    TransactionRateLimited,
+    ValuationRateLimited,
+    ValuationTooLarge,
 )
 from domain.exceptions import InsufficientBalanceError, InvalidValueError
+from presentation.http.protection import authentication_limited_response
 
 
 def install_error_handlers(app: FastAPI) -> None:
     """Instala somente as traduções necessárias às rotas desta etapa."""
 
+    @app.exception_handler(TransactionRateLimited)
+    async def transaction_limited(request: Request, error: TransactionRateLimited):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": "transaction_rate_limited",
+                "message": "Transaction budget exhausted",
+            },
+            headers={
+                "Retry-After": str(error.retry_after),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.exception_handler(AuthenticationLimited)
+    async def authentication_limited(request: Request, error: AuthenticationLimited):
+        return authentication_limited_response(error)
+
+    @app.exception_handler(ValuationRateLimited)
+    async def valuation_limited(request: Request, error: ValuationRateLimited):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "code": "valuation_rate_limited",
+                "message": "Valuation budget exhausted",
+            },
+            headers={
+                "Retry-After": str(error.retry_after),
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @app.exception_handler(ValuationTooLarge)
+    async def valuation_too_large(request: Request, error: ValuationTooLarge):
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": "valuation_too_large",
+                "message": "Too many open positions to value",
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.exception_handler(QuotesUnavailable)
     async def quotes_failure(request: Request, error: QuotesUnavailable):
-        headers = {"Cache-Control": "no-store"}
+        request_id = request.app.state.failure_diagnostics.record(
+            category="quotes",
+            method=request.method,
+            route=getattr(request.scope.get("route"), "path", None),
+            error=error,
+            reason=error.reason,
+            ticker_count=len(error.tickers),
+        )
+        headers = {"Cache-Control": "no-store", "X-Request-ID": request_id}
         if error.retry_after is not None:
             headers["Retry-After"] = str(error.retry_after)
         return JSONResponse(
@@ -111,10 +167,17 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(SQLAlchemyError)
     async def persistence_failure(request: Request, error: SQLAlchemyError):
         # hide_parameters não redige o DETAIL do servidor; nunca retornar str(error).
+        request_id = request.app.state.failure_diagnostics.record(
+            category="database",
+            method=request.method,
+            route=getattr(request.scope.get("route"), "path", None),
+            error=error,
+        )
         return JSONResponse(
             status_code=503,
             content={
                 "code": "persistence_unavailable",
                 "message": "Persistence unavailable",
             },
+            headers={"X-Request-ID": request_id, "Cache-Control": "no-store"},
         )
