@@ -1,6 +1,11 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -8,6 +13,7 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
@@ -26,13 +32,17 @@ jobs:
       TEST_DATABASE_DISPOSABLE: "1"
       TEST_DATABASE_URL: postgresql+psycopg://test_user:synthetic-test-password@127.0.0.1:5432/cotaflow_test_ci
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
           version: "0.13.5"
           python-version: "3.13"
       - name: Instalar dependências pelo lockfile
         run: uv sync --locked
+      - name: Auditar lock de runtime e desenvolvimento em Linux
+        run: |
+          uv export --locked --format requirements-txt --no-emit-project --output-file "$RUNNER_TEMP/requirements-audit.txt" --quiet
+          uv run --locked pip-audit --require-hashes --disable-pip --cache-dir "$RUNNER_TEMP/pip-audit" --requirement "$RUNNER_TEMP/requirements-audit.txt"
       - name: Lint e formatação
         run: |
           uv run --locked ruff check .
@@ -40,9 +50,16 @@ jobs:
       - name: Testes locais e integração PostgreSQL
         run: uv run --locked python -m pytest tests integration_tests -q --tb=short
       - name: Validar Compose com configuração fictícia
+        env:
+          JWT_SECRET_KEY: synthetic-compose-validation-key-at-least-32-characters
         run: docker compose --env-file .env.example --profile tools config --quiet
       - name: Construir imagem
         run: docker build --tag cotaflow-api:ci .
+      - name: Auditar SO e pacotes da imagem construída
+        # HIGH/CRITICAL, inclusive sem correção; falha de scanner também bloqueia.
+        # Sem exceções. Revisar versão/digest do scanner a cada atualização.
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock:ro ghcr.io/aquasecurity/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb image --scanners vuln --image-src docker --severity HIGH,CRITICAL --exit-code 1 --timeout 5m cotaflow-api:ci
       - name: Conferir artefato de execução sem rede
         run: |
           docker run --rm --network none --entrypoint python cotaflow-api:ci -c '
@@ -54,7 +71,7 @@ jobs:
           assert os.getuid() == 1000
           assert not any(root.glob(".env*"))
           assert all(not (root / name).exists() for name in ("docs", "AGENTS.md", ".git", "tests", "integration_tests", "runtime_tests"))
-          assert all(importlib.util.find_spec(name) is None for name in ("pytest", "pytest_cov", "ruff"))
+          assert all(importlib.util.find_spec(name) is None for name in ("pytest", "pytest_cov", "ruff", "pip_audit", "pip", "ensurepip"))
           assert not hasattr(main.app.state, "uow_factory")
           '
       - name: Validar migrations e inicialização da imagem
