@@ -69,6 +69,7 @@ jobs:
           import main
           root = Path("/app")
           assert os.getuid() == 1000
+          assert (root / "LICENSE").read_text().startswith("MIT License\n")
           assert not any(root.glob(".env*"))
           assert all(not (root / name).exists() for name in ("docs", "AGENTS.md", ".git", "tests", "integration_tests", "runtime_tests"))
           assert all(importlib.util.find_spec(name) is None for name in ("pytest", "pytest_cov", "ruff", "pip_audit", "pip", "ensurepip"))
