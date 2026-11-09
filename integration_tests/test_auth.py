@@ -531,3 +531,66 @@ def test_configured_frontend_can_use_real_bearer_without_cookie_auth(
     assert missing.status_code == 401
     assert missing.json()["code"] == "invalid_token"
     assert missing.headers["access-control-allow-origin"] == origin
+
+
+@pytest.mark.parametrize("operation", ["register", "login"])
+def test_invalid_password_encoding_rejects_without_sql_or_persisted_users(
+    auth_client, session_factory, operation
+):
+    import json
+
+    statements = []
+    engine = session_factory.kw["bind"]
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        response = auth_client.post(
+            f"/api/v1/auth/{operation}",
+            content=json.dumps(
+                {"email": "unicode@example.com", "password": "abcdefgh\ud800"}
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert response.status_code == 422
+    assert response.json()["code"] == "invalid_request"
+    assert response.json()["details"] == [
+        {"location": ["body", "password"], "type": "value_error"}
+    ]
+    assert statements == []
+    assert "abcdefgh" not in response.text
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(UserModel)) == 0
+
+
+def test_valid_unicode_password_preserves_spaces_and_authenticates(
+    auth_client, session_factory
+):
+    credentials = {"email": "unicode@example.com", "password": " Senha válida 🔐 "}
+    registered = auth_client.post("/api/v1/auth/register", json=credentials)
+    assert registered.status_code == 201
+    with session_factory() as session:
+        stored = session.get(UserModel, UUID(registered.json()["id"]))
+        assert PasswordHash.recommended().verify(
+            credentials["password"], stored.password_hash
+        )
+        assert not PasswordHash.recommended().verify(
+            credentials["password"].strip(), stored.password_hash
+        )
+    invalid = auth_client.post(
+        "/api/v1/auth/login",
+        json=credentials | {"password": credentials["password"].strip()},
+    )
+    assert invalid.status_code == 401
+    assert invalid.json()["code"] == "invalid_credentials"
+    logged_in = auth_client.post("/api/v1/auth/login", json=credentials)
+    assert logged_in.status_code == 200
+    protected = auth_client.get(
+        "/api/v1/assets",
+        headers={"Authorization": "Bearer " + logged_in.json()["access_token"]},
+    )
+    assert protected.status_code == 200

@@ -14,6 +14,16 @@ class LoginRequest(BaseModel):
     email: EmailStr
     password: SecretStr = Field(min_length=1, max_length=128)
 
+    @field_validator("password")
+    @classmethod
+    def valid_password_encoding(cls, value: SecretStr) -> SecretStr:
+        """Rejeita surrogates isolados antes de banco/Argon2, sem mudar a senha."""
+        try:
+            value.get_secret_value().encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("Password must be valid UTF-8 text") from None
+        return value
+
     @field_validator("email")
     @classmethod
     def canonical_email(cls, value: str) -> str:
