@@ -131,3 +131,29 @@ def test_security_key_is_masked_and_lifetime_is_bounded(security_settings):
         assert caught.value.errors(include_input=False)[0]["loc"] == (
             "JWT_ACCESS_TOKEN_MINUTES",
         )
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "",
+        " " * 64,
+        " " * 32 + "short" + " " * 32,
+        "replace-with-a-random-secret-of-at-least-32-characters",
+        " \treplace-with-a-random-secret-of-at-least-32-characters\n",
+    ],
+)
+def test_blank_short_and_published_jwt_keys_are_rejected_without_exposure(secret):
+    with pytest.raises(ValidationError) as caught:
+        SecuritySettings(_env_file=None, JWT_SECRET_KEY=secret)
+    assert caught.value.errors(include_input=False)[0]["loc"] == ("JWT_SECRET_KEY",)
+    if secret:
+        assert secret not in str(caught.value)
+    assert "input_value" not in str(caught.value)
+
+
+def test_valid_jwt_key_preserves_exact_whitespace_and_minimum_length():
+    secret = " \tsynthetic-valid-signing-key-32ch\n "
+    assert len(secret.strip()) == 32
+    settings = SecuritySettings(_env_file=None, JWT_SECRET_KEY=secret)
+    assert settings.JWT_SECRET_KEY.get_secret_value() == secret
