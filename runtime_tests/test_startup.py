@@ -321,3 +321,80 @@ def test_image_lock_timeout_exits_without_http_then_restart_works(
         assert "cotaflow" not in inspect(postgres_engine).get_schema_names()
     docker("start", name)
     wait_until_serving(name, 18084)
+
+
+def test_image_unicode_auth_and_financial_flow_preserve_facts(
+    postgres_engine, start_container
+):
+    port = 18085
+    name = start_container(port=port)
+    wait_until_serving(name, port)
+    invalid = http_request(
+        name,
+        port,
+        "/api/v1/auth/register",
+        {"email": "invalid@example.com", "password": "abcdefgh\ud800"},
+    )
+    assert invalid["status"] == 422
+    assert invalid["body"]["code"] == "invalid_request"
+    with postgres_engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM cotaflow.users")) == 0
+    credentials = {"email": "unicode@example.com", "password": " Senha válida 🔐 "}
+    registered = http_request(name, port, "/api/v1/auth/register", credentials)
+    assert registered["status"] == 201
+    login = http_request(name, port, "/api/v1/auth/login", credentials)
+    assert login["status"] == 200
+    headers = {"Authorization": "Bearer " + login["body"]["access_token"]}
+    with postgres_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO cotaflow.assets VALUES ('TEST3', 'Synthetic stock', 'stock')"
+        )
+    body = {
+        "ticker": "TEST3",
+        "quantity": "10",
+        "price": "30",
+        "type": "buy",
+        "date": "2026-01-01",
+    }
+    bought = http_request(name, port, "/api/v1/portfolio/transactions", body, headers)
+    assert bought["status"] == 201
+    sold = http_request(
+        name,
+        port,
+        "/api/v1/portfolio/transactions",
+        body | {"type": "sell", "quantity": "5"},
+        headers,
+    )
+    assert sold["status"] == 201
+    rejected = http_request(
+        name,
+        port,
+        "/api/v1/portfolio/transactions",
+        body | {"type": "sell", "quantity": "6"},
+        headers,
+    )
+    assert rejected["status"] == 409
+    assert rejected["body"]["code"] == "insufficient_balance"
+    positions = http_request(name, port, "/api/v1/portfolio/positions", headers=headers)
+    assert positions["status"] == 200
+    from decimal import Decimal
+
+    assert Decimal(positions["body"]["total_cost"]) == Decimal(150)
+    history = http_request(
+        name, port, "/api/v1/portfolio/transactions", headers=headers
+    )
+    assert history["status"] == 200
+    assert [item["id"] for item in history["body"]["items"]] == [
+        bought["body"]["id"],
+        sold["body"]["id"],
+    ]
+    with postgres_engine.connect() as connection:
+        assert (
+            connection.scalar(text("SELECT count(*) FROM cotaflow.transactions")) == 2
+        )
+        assert (
+            connection.scalar(
+                text("SELECT password_hash LIKE '$argon2id$%' FROM cotaflow.users")
+            )
+            is True
+        )

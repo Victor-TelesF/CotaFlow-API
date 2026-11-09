@@ -1,5 +1,6 @@
 """Verify driver TLS with synthetic certificates on the disposable server only."""
 
+import json
 import os
 import subprocess
 from time import monotonic, sleep
@@ -136,6 +137,75 @@ def test_driver_verifies_tls_ca_hostname_and_rejects_invalid_mode(
                 assert tls.bits >= 128
             finally:
                 database.dispose()
+            image = os.environ.get("TEST_RUNTIME_IMAGE")
+            if not image:
+                raise pytest.UsageError(
+                    "TLS check in the runtime image requires TEST_RUNTIME_IMAGE"
+                )
+            # Exercise the image's actual musl/libpq/OpenSSL stack, not only the host driver.
+            script = """
+import json
+import tempfile
+from pathlib import Path
+import psycopg
+import sys
+
+values = json.load(sys.stdin)
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory) / 'root.crt'
+    root.write_text(values.pop('certificate'))
+    wrong_root = Path(directory) / 'wrong.crt'
+    wrong_root.write_text(values.pop('wrong_certificate'))
+    with psycopg.connect(**values, sslmode='verify-full', sslrootcert=str(root)) as connection:
+        tls = connection.execute('SELECT ssl, version, bits FROM pg_stat_ssl WHERE pid=pg_backend_pid()').fetchone()
+        assert tls[0] is True and tls[1] in {'TLSv1.2', 'TLSv1.3'} and tls[2] >= 128
+    for override, message in [
+        ({'sslrootcert': str(wrong_root)}, 'certificate verify failed'),
+        ({'host': 'wrong-host.test'}, 'does not match host name'),
+    ]:
+        try:
+            psycopg.connect(**(values | {'sslmode': 'verify-full', 'sslrootcert': str(root)} | override))
+        except psycopg.OperationalError as error:
+            assert message in str(error)
+        else:
+            raise AssertionError('Runtime accepted invalid server identity')
+    print('Runtime verify-full CA/hostname checks passed')
+"""
+            values = {
+                "host": "cotaflow-test.local",
+                "hostaddr": "127.0.0.1",
+                "port": 5432,
+                "dbname": url.database,
+                "user": url.username,
+                "password": url.password,
+                "connect_timeout": 3,
+                "certificate": cert.read_text(),
+                "wrong_certificate": untrusted.read_text(),
+            }
+            result = subprocess.run(
+                [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "-i",
+                    "--network",
+                    f"container:{container}",
+                    "--entrypoint",
+                    "python",
+                    image,
+                    "-c",
+                    script,
+                ],
+                input=json.dumps(values),
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            assert result.returncode == 0, result.stderr
+            assert (
+                result.stdout.strip() == "Runtime verify-full CA/hostname checks passed"
+            )
             for mode, root, host, message in (
                 ("invalid-mode", cert, "cotaflow-test.local", "invalid sslmode"),
                 (
