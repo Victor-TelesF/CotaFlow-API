@@ -14,7 +14,18 @@ services:
       <<: *database-environment
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Defina uma chave aleatoria JWT_SECRET_KEY no .env}
       JWT_ACCESS_TOKEN_MINUTES: ${JWT_ACCESS_TOKEN_MINUTES:-30}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-[]}
+      MIGRATION_LOCK_TIMEOUT_SECONDS: ${MIGRATION_LOCK_TIMEOUT_SECONDS:-30}
+      AUTH_REGISTER_PER_10_MINUTES: ${AUTH_REGISTER_PER_10_MINUTES:-5}
+      AUTH_LOGIN_PER_MINUTE: ${AUTH_LOGIN_PER_MINUTE:-20}
+      AUTH_LOGIN_PAIR_PER_5_MINUTES: ${AUTH_LOGIN_PAIR_PER_5_MINUTES:-5}
+      AUTH_MAX_CONCURRENT: ${AUTH_MAX_CONCURRENT:-2}
+      PORTFOLIO_TRANSACTIONS_PER_MINUTE: ${PORTFOLIO_TRANSACTIONS_PER_MINUTE:-30}
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-}
       BRAPI_TOKEN: ${BRAPI_TOKEN:-}
+      MARKET_MAX_TICKERS: ${MARKET_MAX_TICKERS:-20}
+      MARKET_VALUATIONS_PER_MINUTE: ${MARKET_VALUATIONS_PER_MINUTE:-10}
+      MARKET_EXTERNAL_CALLS_PER_MINUTE: ${MARKET_EXTERNAL_CALLS_PER_MINUTE:-30}
     ports:
       - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     healthcheck:
@@ -32,7 +43,9 @@ services:
     image: cotaflow-api:local
     profiles: ["tools"]
     command: ["alembic", "upgrade", "head"]
-    environment: *database-environment
+    environment:
+      <<: *database-environment
+      MIGRATION_LOCK_TIMEOUT_SECONDS: ${MIGRATION_LOCK_TIMEOUT_SECONDS:-30}
     depends_on:
       db:
         condition: service_healthy

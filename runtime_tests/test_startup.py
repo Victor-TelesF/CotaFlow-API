@@ -39,7 +39,14 @@ def start_container(postgres_engine):
     docker("image", "inspect", image)
     containers = []
 
-    def start(*, network=None, port="8000", database_port=5432):
+    def start(
+        *,
+        network=None,
+        port="8000",
+        database_port=5432,
+        trusted_proxies="",
+        migration_timeout="30",
+    ):
         url = postgres_engine.url
         environment = {
             "DB_DRIVER": "postgresql+psycopg",
@@ -52,6 +59,9 @@ def start_container(postgres_engine):
             "PGCONNECT_TIMEOUT": "5",
             "JWT_SECRET_KEY": "synthetic-runtime-key-with-at-least-32-characters",
             "PORT": str(port),
+            "FORWARDED_ALLOW_IPS": trusted_proxies,
+            "MIGRATION_LOCK_TIMEOUT_SECONDS": migration_timeout,
+            "CORS_ALLOW_ORIGINS": "[]",
         }
         name = f"cotaflow-runtime-test-{uuid4().hex}"
         containers.append(name)
@@ -78,7 +88,7 @@ def state(name):
     return json.loads(docker("inspect", "--format", "{{json .State}}", name))
 
 
-def http_request(name, port, path="/health", payload=None):
+def http_request(name, port, path="/health", payload=None, headers=None):
     """Use real HTTP inside the test network, including on Docker Desktop."""
     script = """
 import json
@@ -90,7 +100,7 @@ payload = json.loads(sys.argv[3])
 request = Request(
     'http://127.0.0.1:' + sys.argv[1] + sys.argv[2],
     data=json.dumps(payload).encode() if payload is not None else None,
-    headers={'Content-Type': 'application/json'},
+    headers={'Content-Type': 'application/json'} | json.loads(sys.argv[4]),
 )
 try:
     result = urlopen(request, timeout=3)
@@ -110,6 +120,7 @@ with result as response:
             str(port),
             path,
             json.dumps(payload),
+            json.dumps(headers or {}),
         ],
         capture_output=True,
         text=True,
@@ -215,3 +226,98 @@ def test_migration_failure_exits_before_starting_http(
     assert expected_error in logs
     assert "Uvicorn running" not in logs
     assert "Application startup complete" not in logs
+
+
+@pytest.mark.parametrize("trusted_proxies", ["", "127.0.0.1"])
+def test_image_proxy_quota_and_body_rejections_preserve_empty_database(
+    postgres_engine, start_container, trusted_proxies
+):
+    port = 18081
+    name = start_container(port=port, trusted_proxies=trusted_proxies)
+    wait_until_serving(name, port)
+    for number in range(1, 7):
+        response = http_request(
+            name,
+            port,
+            "/api/v1/auth/register",
+            {},
+            {"X-Forwarded-For": f"203.0.113.{number}"},
+        )
+        assert response is not None
+        expected = 429 if not trusted_proxies and number == 6 else 422
+        assert response["status"] == expected
+        if expected == 429:
+            assert response["body"] == {
+                "code": "authentication_rate_limited",
+                "message": "Authentication budget exhausted",
+            }
+    response = http_request(
+        name,
+        port,
+        "/api/v1/auth/login",
+        {"email": "synthetic@example.com", "password": "x" * 17000},
+    )
+    assert response == {
+        "status": 413,
+        "body": {
+            "code": "request_too_large",
+            "message": "Request body exceeds 16384 bytes",
+        },
+    }
+    assert http_request(name, port) == {"status": 200, "body": {"status": "ok"}}
+    with postgres_engine.connect() as connection:
+        for table in ("users", "assets", "transactions"):
+            assert (
+                connection.scalar(text(f"SELECT count(*) FROM cotaflow.{table}")) == 0
+            )
+
+
+def test_two_image_boots_serialize_before_http(postgres_engine, start_container):
+    names = []
+    with postgres_engine.begin() as blocker:
+        blocker.exec_driver_sql("SELECT pg_advisory_xact_lock(1129272385, 1)")
+        names = [start_container(port=port) for port in (18082, 18083)]
+        deadline = monotonic() + 10
+        while monotonic() < deadline:
+            assert all(state(name)["Running"] for name in names)
+            with postgres_engine.connect() as observer:
+                waiting = observer.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_locks WHERE locktype='advisory' "
+                        "AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
+                        "AND classid=1129272385 AND objid=1 AND NOT granted"
+                    )
+                )
+            if waiting == 2:
+                break
+            sleep(0.05)
+        else:
+            pytest.fail("Both image migrations did not wait for the shared lock")
+        assert http_request(names[0], 18082) is None
+        assert http_request(names[1], 18083) is None
+        assert "cotaflow" not in inspect(postgres_engine).get_schema_names()
+    for name, port in zip(names, (18082, 18083), strict=True):
+        wait_until_serving(name, port)
+    with postgres_engine.connect() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT version_num FROM cotaflow.alembic_version"
+        ).all() == [("0001",)]
+
+
+def test_image_lock_timeout_exits_without_http_then_restart_works(
+    postgres_engine, start_container
+):
+    with postgres_engine.begin() as blocker:
+        blocker.exec_driver_sql("SELECT pg_advisory_xact_lock(1129272385, 1)")
+        name = start_container(port=18084, migration_timeout="1")
+        deadline = monotonic() + 10
+        while state(name)["Running"] and monotonic() < deadline:
+            sleep(0.05)
+        assert not state(name)["Running"]
+        assert state(name)["ExitCode"] != 0
+        logs = docker("logs", name)
+        assert "lock timeout" in logs
+        assert "Uvicorn running" not in logs
+        assert "cotaflow" not in inspect(postgres_engine).get_schema_names()
+    docker("start", name)
+    wait_until_serving(name, 18084)
