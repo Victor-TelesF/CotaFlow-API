@@ -421,3 +421,22 @@ def test_waiting_for_http_slot_has_bounded_timeout_without_http(market):
     assert calls == []
     assert cache._flights == {}
     assert cache.get_quotes({"TEST3"})["TEST3"].price == Decimal(42)
+
+
+def test_deep_json_is_invalid_negatively_cached_and_recovers_at_expiry(market):
+    seconds, calls, reply, _, cache = market
+    nested = b'{"results":' + b"[" * 15000 + b"0" + b"]" * 15000 + b"}"
+    assert len(nested) < 65536
+    reply[0] = lambda request: httpx2.Response(200, content=nested)
+    for instant in (1000.0, 1004.999):
+        seconds[0] = instant
+        with pytest.raises(QuotesUnavailable) as caught:
+            cache.get_quotes({"TEST3"})
+        assert caught.value.reason == "invalid_response"
+        assert caught.value.tickers == ("TEST3",)
+        assert cache._flights == {}
+    assert len(calls) == 1
+    seconds[0] = 1005.0
+    reply[0] = lambda request: httpx2.Response(200, content=body())
+    assert cache.get_quotes({"TEST3"})["TEST3"].price == Decimal(42)
+    assert len(calls) == 2

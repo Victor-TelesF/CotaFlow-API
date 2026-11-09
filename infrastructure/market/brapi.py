@@ -148,5 +148,12 @@ class BrapiQuotes:
                     raise ValueError
                 quoted_at = quoted_at.astimezone(UTC)
             return Quote(ticker, price, "BRL", "brapi", quoted_at, self._now())
-        except (ValueError, TypeError, KeyError, ArithmeticError, UnicodeError):
+        except (
+            ValueError,
+            TypeError,
+            KeyError,
+            ArithmeticError,
+            UnicodeError,
+            RecursionError,
+        ):
             raise QuotesUnavailable({ticker}, "invalid_response") from None

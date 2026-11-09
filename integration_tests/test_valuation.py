@@ -419,3 +419,45 @@ def test_two_users_share_inflight_quote_without_sharing_portfolio_or_holding_dat
     assert [
         client.get(HISTORY, headers=header).json() for header in headers
     ] == histories
+
+
+def test_nested_provider_json_returns_safe_failure_without_changing_portfolio(
+    valuation_setup, caplog
+):
+    client, headers, calls, failures, _, _ = valuation_setup
+    write(client, headers[0])
+    before = client.get(HISTORY, headers=headers[0]).json()
+    nested = b'{"results":' + b"[" * 15000 + b"0" + b"]" * 15000 + b"}"
+    assert len(nested) < 65536
+    failures["TEST3"] = (200, nested, {})
+    # Fix all clocks together so the assertion measures the negative-cache TTL.
+    clock = lambda: 1000.0
+    client.app.state.quotes._clock = clock
+    client.app.state.quotes._provider._clock = clock
+    responses = [client.get(VALUATION, headers=headers[0]) for _ in range(2)]
+    assert [response.status_code for response in responses] == [503, 503]
+    assert calls == ["TEST3"]
+    for response in responses:
+        assert response.json() == {
+            "code": "quotes_unavailable",
+            "message": "Unable to complete portfolio valuation",
+            "tickers": ["TEST3"],
+            "reason": "invalid_response",
+        }
+        assert "total_market_value" not in response.json()
+        assert response.headers["X-Request-ID"]
+    assert client.app.state.quotes._flights == {}
+    assert client.get(HISTORY, headers=headers[0]).json() == before
+    positions = client.get("/api/v1/portfolio/positions", headers=headers[0])
+    assert positions.status_code == 200
+    assert Decimal(positions.json()["total_cost"]) == Decimal(300)
+    records = [
+        record for record in caplog.records if record.name == "cotaflow.diagnostics"
+    ]
+    assert len(records) == 2
+    assert all(
+        json.loads(record.getMessage())["reason"] == "invalid_response"
+        for record in records
+    )
+    assert "RecursionError" not in caplog.text
+    assert "synthetic-brapi-token" not in caplog.text
