@@ -5,7 +5,12 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from application.exceptions import CatalogAssetNotFound, InvalidToken, QuotesUnavailable
+from application.exceptions import (
+    CatalogAssetNotFound,
+    InvalidToken,
+    QuotesUnavailable,
+    ValuationTooLarge,
+)
 from application.ports import QuoteProvider, UnitOfWork
 from application.types import PortfolioValuation
 from domain.assets.asset import normalize_ticker
@@ -38,8 +43,8 @@ def register_transaction(
         transaction = Transaction(
             asset, quantity, price, transaction_type, transaction_date
         )
-        portfolio = Portfolio(uow.transactions.list_for_user(user_id))
-        portfolio.add_transaction(transaction)
+        # Uma única reconstrução valida o candidato e toda a linha do tempo.
+        Portfolio([*uow.transactions.list_for_user(user_id), transaction])
         persisted = uow.transactions.add(user_id, transaction)
         uow.commit()
     return persisted
@@ -75,10 +80,13 @@ def evaluate_portfolio(
     user_id: UUID,
     uow_factory: Callable[[], UnitOfWork],
     quotes: QuoteProvider,
+    max_tickers: int,
 ) -> PortfolioValuation:
     """Libera o banco antes do HTTP e exige preços para todas as posições."""
     portfolio = load_portfolio(user_id, uow_factory)
     tickers = set(portfolio.positions)
+    if len(tickers) > max_tickers:
+        raise ValuationTooLarge
     snapshot = quotes.get_quotes(tickers) if tickers else {}
     missing = tickers - snapshot.keys()
     if missing:
