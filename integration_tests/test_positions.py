@@ -13,7 +13,12 @@ from application.portfolio import load_portfolio
 from application.types import User
 from domain.assets import Asset
 from domain.enums import AssetType
-from infrastructure.config import MarketSettings, SecuritySettings, Settings
+from infrastructure.config import (
+    MarketSettings,
+    PortfolioSettings,
+    SecuritySettings,
+    Settings,
+)
 from infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from main import create_app
 
@@ -44,6 +49,7 @@ def positions_setup(session_factory, monkeypatch):
             JWT_SECRET_KEY="synthetic-positions-key-at-least-32-characters",
         ),
         MarketSettings(_env_file=None),
+        portfolio_settings=PortfolioSettings(_env_file=None),
     )
     with TestClient(app) as client:
         app.state.uow_factory = factory
@@ -204,7 +210,11 @@ def test_retroactive_operations_and_same_day_sequence(positions_setup):
 
 def test_history_pagination_cannot_truncate_positions(positions_setup, session_factory):
     client, _, headers, _ = positions_setup
-    for _ in range(50):
+    seconds = [1000.0]
+    client.app.state.transaction_limits._clock = lambda: seconds[0]
+    for index in range(50):
+        # Build the long history across valid quota windows, without sleeping.
+        seconds[0] = 1000.0 + 60 * (index // 30)
         write(client, headers[0], quantity="1", price="2")
     write(client, headers[0], type="sell", quantity="49", price="100")
     assert len(client.get(HISTORY, headers=headers[0]).json()["items"]) == 50

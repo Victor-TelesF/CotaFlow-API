@@ -13,7 +13,8 @@ import domain.portfolio.transaction as transaction_module
 import main
 from application.types import User
 from domain.assets import Asset
-from domain.enums import AssetType
+from domain.enums import AssetType, TransactionType
+from domain.portfolio import Transaction
 from infrastructure.config import MarketSettings, SecuritySettings, Settings
 from infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -64,7 +65,7 @@ def valuation_setup(session_factory, monkeypatch):
                         {
                             "symbol": ticker,
                             "currency": "BRL",
-                            "regularMarketPrice": prices[ticker],
+                            "regularMarketPrice": prices.get(ticker, 42),
                             "regularMarketTime": "2026-11-07T21:32:40.000Z",
                         }
                     ]
@@ -230,7 +231,7 @@ def test_stock_fii_and_new_write_during_http_use_original_portfolio_snapshot(
     ],
 )
 def test_provider_failure_has_no_partial_total_and_preserves_history_and_cost(
-    valuation_setup, status, content, response_headers, reason
+    valuation_setup, status, content, response_headers, reason, caplog
 ):
     client, headers, calls, failures, _, _ = valuation_setup
     write(client, headers[0])
@@ -249,6 +250,23 @@ def test_provider_failure_has_no_partial_total_and_preserves_history_and_cost(
     assert "total_market_value" not in response.json()
     assert "synthetic-private" not in response.text
     assert "synthetic-brapi-token" not in response.text
+    records = [r for r in caplog.records if r.name == "cotaflow.diagnostics"]
+    assert len(records) == 1
+    assert json.loads(records[0].getMessage()) == {
+        "event": "request_failure",
+        "category": "quotes",
+        "method": "GET",
+        "route": VALUATION,
+        "request_id": response.headers["X-Request-ID"],
+        "exception_type": "QuotesUnavailable",
+        "reason": reason,
+        "ticker_count": 1,
+        "suppressed": 0,
+    }
+    assert records[0].exc_info is records[0].stack_info is None
+    assert "synthetic-private" not in caplog.text
+    assert "synthetic-brapi-token" not in caplog.text
+    assert headers[0]["Authorization"] not in caplog.text
     if status == 429:
         assert response.headers["Retry-After"] == "90"
     assert calls == ["FUND11", "TEST3"]
@@ -303,3 +321,101 @@ def test_incomplete_provider_contract_cannot_escape_as_complete_valuation(
     assert response.json()["code"] == "quotes_unavailable"
     assert "total_market_value" not in response.json()
     assert calls == []
+
+
+def test_oversized_portfolio_rejects_before_http_and_can_sell_to_the_exact_limit(
+    valuation_setup, session_factory
+):
+    client, headers, calls, _, _, users = valuation_setup
+    with SqlAlchemyUnitOfWork(session_factory) as uow:
+        for index in range(21):
+            asset = Asset(f"Synthetic {index}", f"SYN{index}", AssetType.STOCK)
+            uow.assets.add(asset)
+            uow.transactions.add(
+                users[0].id,
+                Transaction(
+                    asset,
+                    Decimal(1),
+                    Decimal(30),
+                    TransactionType.BUY,
+                    date(2026, 1, 1),
+                ),
+            )
+        uow.commit()
+    before = client.get(HISTORY, headers=headers[0]).json()
+    rejected = client.get(VALUATION, headers=headers[0])
+    assert rejected.status_code == 422
+    assert rejected.json() == {
+        "code": "valuation_too_large",
+        "message": "Too many open positions to value",
+    }
+    assert calls == []
+    assert client.get(HISTORY, headers=headers[0]).json() == before
+    assert Decimal(
+        client.get("/api/v1/portfolio/positions", headers=headers[0]).json()[
+            "total_cost"
+        ]
+    ) == Decimal(630)
+    write(client, headers[0], ticker="SYN20", quantity="1", type="sell")
+    valued = client.get(VALUATION, headers=headers[0])
+    assert valued.status_code == 200
+    assert len(valued.json()["positions"]) == 20
+    assert Decimal(valued.json()["total_cost"]) == Decimal(600)
+    assert Decimal(valued.json()["total_market_value"]) == Decimal(840)
+    assert len(calls) == 20
+    assert len(client.get(HISTORY, headers=headers[0]).json()["items"]) == 22
+
+
+def test_two_users_share_inflight_quote_without_sharing_portfolio_or_holding_database(
+    valuation_setup, session_factory
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from infrastructure.market.limits import ValuationLimits
+
+    client, headers, calls, _, hook, _ = valuation_setup
+    write(client, headers[0])
+    write(client, headers[1], quantity="2")
+    histories = [client.get(HISTORY, headers=header).json() for header in headers]
+    client.app.state.valuation_limits = ValuationLimits(1)
+    entered, waiting, release = Event(), Event(), Event()
+
+    def block_http():
+        entered.set()
+        assert release.wait(5)
+
+    hook[0] = block_http
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(client.get, VALUATION, headers=headers[0])
+        assert entered.wait(5)
+        flight = client.app.state.quotes._flights["TEST3"]
+        real_event = flight.done
+
+        class ObservedEvent:
+            def wait(self, timeout):
+                waiting.set()
+                return real_event.wait(timeout)
+
+            def set(self):
+                real_event.set()
+
+        flight.done = ObservedEvent()
+        second = pool.submit(client.get, VALUATION, headers=headers[1])
+        try:
+            assert waiting.wait(5)
+            assert session_factory.kw["bind"].pool.checkedout() == 0
+        finally:
+            release.set()
+        responses = [future.result(timeout=5) for future in (first, second)]
+    assert [response.status_code for response in responses] == [200, 200]
+    assert [
+        Decimal(response.json()["total_market_value"]) for response in responses
+    ] == [Decimal(420), Decimal(84)]
+    assert calls == ["TEST3"]
+    rejected = client.get(VALUATION, headers=headers[0])
+    assert rejected.status_code == 429
+    assert rejected.json()["code"] == "valuation_rate_limited"
+    assert [
+        client.get(HISTORY, headers=header).json() for header in headers
+    ] == histories

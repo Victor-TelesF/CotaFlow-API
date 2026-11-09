@@ -1,26 +1,34 @@
 """Etapa 4 sobre PostgreSQL real: histórico, rollback, isolamento e corridas."""
 
+import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 from datetime import date
 from decimal import Decimal
 from functools import partial
 from threading import Barrier, Event, Lock
-from time import monotonic
-from uuid import UUID
+from time import monotonic, perf_counter
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select, text
+from sqlalchemy import event, func, insert, select, text
 from sqlalchemy.exc import IntegrityError
 
 import domain.portfolio.transaction as transaction_module
-from application.exceptions import InvalidToken
+from application.assets import register_asset
+from application.exceptions import AssetAlreadyRegistered, InvalidToken
 from application.portfolio import register_transaction
 from application.types import User
-from domain.enums import TransactionType
-from domain.portfolio import Portfolio, Transaction
-from infrastructure.config import MarketSettings, SecuritySettings, Settings
-from infrastructure.database.models import AssetModel
+from domain.enums import AssetType, TransactionType
+from domain.portfolio import Portfolio, Position, Transaction
+from infrastructure.config import (
+    MarketSettings,
+    PortfolioSettings,
+    SecuritySettings,
+    Settings,
+)
+from infrastructure.database.models import AssetModel, TransactionModel
 from infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 from main import create_app
 
@@ -47,6 +55,7 @@ def portfolio_client(session_factory):
             JWT_SECRET_KEY="synthetic-portfolio-key-at-least-32-characters",
         ),
         MarketSettings(_env_file=None),
+        portfolio_settings=PortfolioSettings(_env_file=None),
     )
     with TestClient(app) as client:
         app.state.uow_factory = partial(SqlAlchemyUnitOfWork, session_factory)
@@ -75,13 +84,13 @@ def owners(portfolio_client):
 
 @pytest.fixture
 def catalog(portfolio_client, owners):
-    response = portfolio_client.post(
-        ASSETS,
-        headers=owners[0][1],
-        json={"ticker": " test3 ", "name": " Synthetic stock ", "type": "stock"},
+    asset = register_asset(
+        " test3 ",
+        " Synthetic stock ",
+        AssetType.STOCK,
+        portfolio_client.app.state.uow_factory,
     )
-    assert response.status_code == 201
-    return response.json()
+    return {"ticker": asset.ticker, "name": asset.name, "type": asset.asset_type.value}
 
 
 def operation(client, headers, **changes):
@@ -104,17 +113,14 @@ def test_catalog_normalization_pagination_and_shared_visibility(
     portfolio_client, owners, catalog, session_factory
 ):
     assert catalog == {"ticker": "TEST3", "name": "Synthetic stock", "type": "stock"}
-    response = portfolio_client.post(
-        ASSETS,
-        headers=owners[1][1],
-        json={"ticker": "FUND11", "name": "Synthetic FII", "type": "fii"},
+    asset = register_asset(
+        "FUND11", "Synthetic FII", AssetType.FII, portfolio_client.app.state.uow_factory
     )
-    assert response.status_code == 201
-    assert response.json()["type"] == "fii"
+    expected = {"ticker": asset.ticker, "name": asset.name, "type": "fii"}
     for _, headers in owners:
         first = portfolio_client.get(ASSETS, headers=headers, params={"limit": 1})
         assert first.status_code == 200
-        assert first.json() == {"items": [response.json()], "limit": 1, "offset": 0}
+        assert first.json() == {"items": [expected], "limit": 1, "offset": 0}
         second = portfolio_client.get(
             ASSETS, headers=headers, params={"limit": 1, "offset": 1}
         )
@@ -125,33 +131,25 @@ def test_catalog_normalization_pagination_and_shared_visibility(
             ]
             == []
         )
-    duplicate = portfolio_client.post(
-        ASSETS,
-        headers=owners[0][1],
-        json={"ticker": "TeSt3", "name": "Changed", "type": "fii"},
-    )
-    assert duplicate.status_code == 409
-    assert duplicate.json()["code"] == "asset_already_registered"
-    assert "assets_pkey" not in duplicate.text
+    with pytest.raises(AssetAlreadyRegistered):
+        register_asset(
+            "TeSt3", "Changed", AssetType.FII, portfolio_client.app.state.uow_factory
+        )
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AssetModel)) == 2
         assert session.get(AssetModel, "TEST3").name == "Synthetic stock"
         assert session.get(AssetModel, "TEST3").asset_type == "stock"
 
 
-@pytest.mark.parametrize(
-    "changes",
-    [{"ticker": " "}, {"name": " "}, {"type": "crypto"}, {"user_id": "forged"}],
-)
-def test_bad_catalog_data_is_rejected_without_rows(
-    portfolio_client, owners, session_factory, changes
+def test_public_catalog_creation_is_disabled_without_rows(
+    portfolio_client, owners, session_factory
 ):
     response = portfolio_client.post(
         ASSETS,
         headers=owners[0][1],
-        json={"ticker": "TEST3", "name": "Valid", "type": "stock"} | changes,
+        json={"ticker": "TEST3", "name": "Valid", "type": "stock"},
     )
-    assert response.status_code == 422
+    assert response.status_code == 405
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AssetModel)) == 0
 
@@ -181,6 +179,14 @@ def test_buys_sales_preserve_facts_and_paginate_by_date_sequence(
         assert isinstance(response.json()["quantity"], str)
         assert isinstance(response.json()["price"], str)
         assert "user_id" not in response.json()
+        assert set(response.json()) == {
+            "id",
+            "ticker",
+            "quantity",
+            "price",
+            "type",
+            "date",
+        }
     expected = [earlier.json(), first.json(), sale.json()]
     for offset, item in enumerate(expected):
         response = portfolio_client.get(
@@ -202,6 +208,128 @@ def test_buys_sales_preserve_facts_and_paginate_by_date_sequence(
     assert position.quantity == Decimal(15)
     assert position.average_price == Decimal(35)
     assert position.cost == Decimal(525)
+
+
+def test_hidden_sequence_keeps_same_day_order_and_owner_isolation(
+    portfolio_client, owners, catalog, session_factory
+):
+    alice, bob = owners
+    first = operation(portfolio_client, alice[1])
+    other = operation(portfolio_client, bob[1])
+    sale = operation(portfolio_client, alice[1], type="sell")
+    other_sale = operation(portfolio_client, bob[1], type="sell", quantity="3")
+    rebuy = operation(portfolio_client, alice[1], quantity="2", price="80")
+    inserted = [first, other, sale, other_sale, rebuy]
+    fields = {"id", "ticker", "quantity", "price", "type", "date"}
+    for response in inserted:
+        assert response.status_code == 201
+        assert set(response.json()) == fields
+        UUID(response.json()["id"])
+    for (owner, headers), expected, quantity, cost in [
+        (alice, [first, sale, rebuy], Decimal(2), Decimal(160)),
+        (bob, [other, other_sale], Decimal(7), Decimal(210)),
+    ]:
+        history = portfolio_client.get(HISTORY, headers=headers)
+        assert history.status_code == 200
+        assert history.json()["items"] == [response.json() for response in expected]
+        stored = stored_history(session_factory, owner)
+        assert [str(tx.id_transaction) for tx in stored] == [
+            response.json()["id"] for response in expected
+        ]
+        assert all(tx.transaction_sequence > 0 for tx in stored)
+        position = Portfolio(stored).positions["TEST3"]
+        assert (position.quantity, position.cost) == (quantity, cost)
+        positions = portfolio_client.get("/api/v1/portfolio/positions", headers=headers)
+        assert positions.status_code == 200
+        assert Decimal(positions.json()["total_cost"]) == cost
+    # A identity global continua no banco, com os usuários intercalados.
+    with session_factory() as session:
+        rows = session.scalars(
+            select(TransactionModel).order_by(TransactionModel.sequence)
+        ).all()
+        assert [str(row.id) for row in rows] == [r.json()["id"] for r in inserted]
+        assert len({row.sequence for row in rows}) == 5
+
+
+def test_driver_detail_is_not_logged_and_failed_insert_is_rolled_back(
+    portfolio_client, owners, catalog, session_factory, caplog
+):
+    owner, headers = owners[0]
+    first = operation(portfolio_client, headers)
+    assert first.status_code == 201
+    private = "synthetic-private-driver-marker"
+    with session_factory.begin() as session:
+        session.execute(
+            text("""
+            CREATE FUNCTION cotaflow.fail_diagnostic_insert() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN
+                RAISE EXCEPTION USING
+                    MESSAGE = 'synthetic-private-driver-marker',
+                    DETAIL = 'synthetic-private-driver-marker',
+                    ERRCODE = 'P0001';
+            END $$
+        """)
+        )
+        session.execute(
+            text("""
+            CREATE TRIGGER diagnostic_failure AFTER INSERT ON cotaflow.transactions
+            FOR EACH ROW EXECUTE FUNCTION cotaflow.fail_diagnostic_insert()
+        """)
+        )
+    engine = session_factory.kw["bind"]
+    driver_seen = []
+
+    def observe_error(context):
+        error = context.original_exception
+        driver_seen.append(
+            (
+                error.sqlstate,
+                private in error.diag.message_primary,
+                private in error.diag.message_detail,
+            )
+        )
+
+    event.listen(engine, "handle_error", observe_error)
+    try:
+        rejected = operation(portfolio_client, headers, type="sell", quantity="5")
+    finally:
+        event.remove(engine, "handle_error", observe_error)
+    assert rejected.status_code == 503
+    assert rejected.json() == {
+        "code": "persistence_unavailable",
+        "message": "Persistence unavailable",
+    }
+    assert driver_seen == [("P0001", True, True)]
+    records = [r for r in caplog.records if r.name == "cotaflow.diagnostics"]
+    assert len(records) == 1
+    assert json.loads(records[0].getMessage()) == {
+        "event": "request_failure",
+        "category": "database",
+        "method": "POST",
+        "route": HISTORY,
+        "request_id": rejected.headers["X-Request-ID"],
+        "exception_type": "ProgrammingError",
+        "sqlstate": "P0001",
+        "suppressed": 0,
+    }
+    assert records[0].exc_info is records[0].stack_info is None
+    assert private not in caplog.text + rejected.text
+    assert headers["Authorization"] not in caplog.text
+    persisted = stored_history(session_factory, owner)
+    assert [str(tx.id_transaction) for tx in persisted] == [first.json()["id"]]
+    position = Portfolio(persisted).positions["TEST3"]
+    assert (position.quantity, position.cost) == (Decimal(10), Decimal(300))
+    assert engine.pool.checkedout() == 0
+    with session_factory.begin() as session:
+        session.execute(
+            text("DROP TRIGGER diagnostic_failure ON cotaflow.transactions")
+        )
+    assert (
+        operation(portfolio_client, headers, type="sell", quantity="5").status_code
+        == 201
+    )
+    remaining = Portfolio(stored_history(session_factory, owner)).positions["TEST3"]
+    assert (remaining.quantity, remaining.cost) == (Decimal(5), Decimal(150))
 
 
 def test_insufficient_sale_keeps_history_and_position_unchanged(
@@ -297,13 +425,8 @@ def test_exact_numeric_boundaries_today_and_fii_operations(
     portfolio_client, owners, session_factory
 ):
     owner, headers = owners[0]
-    assert (
-        portfolio_client.post(
-            ASSETS,
-            headers=headers,
-            json={"ticker": "FUND11", "name": "Fund", "type": "fii"},
-        ).status_code
-        == 201
+    register_asset(
+        "FUND11", "Fund", AssetType.FII, portfolio_client.app.state.uow_factory
     )
     for quantity, price in [
         ("0.00000001", "9999999999.99999999"),
@@ -461,11 +584,13 @@ def test_concurrent_catalog_registration_has_one_winner(
             barrier.wait(timeout=5)
 
     def create(ticker):
-        return portfolio_client.post(
-            ASSETS,
-            headers=owners[0][1],
-            json={"ticker": ticker, "name": "Race", "type": "fii"},
-        )
+        try:
+            register_asset(
+                ticker, "Race", AssetType.FII, portfolio_client.app.state.uow_factory
+            )
+            return "added"
+        except AssetAlreadyRegistered:
+            return "duplicate"
 
     event.listen(engine, "before_cursor_execute", coordinate)
     try:
@@ -476,13 +601,7 @@ def test_concurrent_catalog_registration_has_one_winner(
             responses = [future.result(timeout=15) for future in futures]
     finally:
         event.remove(engine, "before_cursor_execute", coordinate)
-    assert sorted(response.status_code for response in responses) == [201, 409]
-    assert (
-        next(response for response in responses if response.status_code == 409).json()[
-            "code"
-        ]
-        == "asset_already_registered"
-    )
+    assert sorted(responses) == ["added", "duplicate"]
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AssetModel)) == 1
         assert session.get(AssetModel, "RACE11").asset_type == "fii"
@@ -567,3 +686,170 @@ def test_concurrent_sales_wait_for_user_lock_and_cannot_oversell(
     assert position.quantity == Decimal(3)
     assert position.cost == Decimal(90)
     assert engine.pool.checkedout() == 0
+
+
+@pytest.mark.parametrize("path", [ASSETS, HISTORY])
+def test_offset_excess_executes_no_sql_and_exact_limit_remains_usable(
+    portfolio_client, owners, session_factory, path
+):
+    statements = []
+    engine = session_factory.kw["bind"]
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        for offset in (10001, 2**100):
+            response = portfolio_client.get(
+                path, headers=owners[0][1], params={"offset": offset}
+            )
+            assert response.status_code == 422
+            assert response.json()["code"] == "invalid_request"
+            assert statements == []
+        response = portfolio_client.get(
+            path, headers=owners[0][1], params={"offset": 10000}
+        )
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "offset": 10000, "limit": 50}
+        assert statements
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+
+
+def test_transaction_quota_preserves_state_isolates_users_and_allows_exit_after_expiry(
+    portfolio_client, owners, catalog, session_factory
+):
+    owner, headers = owners[0]
+    seconds = [1000.0]
+    portfolio_client.app.state.transaction_limits._clock = lambda: seconds[0]
+    assert operation(portfolio_client, headers).status_code == 201
+    for _ in range(29):
+        failed = operation(portfolio_client, headers, type="sell", quantity="11")
+        assert failed.status_code == 409
+        assert failed.json()["code"] == "insufficient_balance"
+    before = stored_history(session_factory, owner)
+    statements = []
+    engine = session_factory.kw["bind"]
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        rejected = operation(portfolio_client, headers, type="sell")
+        assert rejected.status_code == 429
+        assert rejected.json()["code"] == "transaction_rate_limited"
+        assert rejected.headers["Retry-After"] == "60"
+        # Only identity resolution; no lock, asset lookup, history or INSERT.
+        assert len(statements) == 1
+        assert "cotaflow.users" in statements[0] and "FOR UPDATE" not in statements[0]
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert [asdict(tx) for tx in stored_history(session_factory, owner)] == [
+        asdict(tx) for tx in before
+    ]
+    assert Portfolio(before).get_total_cost() == Decimal(300)
+    assert operation(portfolio_client, owners[1][1], quantity="2").status_code == 201
+    seconds[0] += 59.5
+    rejected = operation(portfolio_client, headers, type="sell")
+    assert rejected.status_code == 429 and rejected.headers["Retry-After"] == "1"
+    seconds[0] += 0.5
+    assert operation(portfolio_client, headers, type="sell").status_code == 201
+    assert Portfolio(stored_history(session_factory, owner)).positions == {}
+    assert (
+        operation(portfolio_client, headers, quantity="2", price="80").status_code
+        == 201
+    )
+    history = stored_history(session_factory, owner)
+    assert len(history) == 3
+    assert Portfolio(history).positions["TEST3"].cost == Decimal(160)
+    assert len(stored_history(session_factory, owners[1][0])) == 1
+
+
+def test_last_write_slot_is_atomic_with_real_concurrent_requests(
+    portfolio_client, owners, catalog, session_factory
+):
+    owner, headers = owners[0]
+    assert operation(portfolio_client, headers).status_code == 201
+    for _ in range(28):
+        assert (
+            operation(portfolio_client, headers, type="sell", quantity="11").status_code
+            == 409
+        )
+    barrier = Barrier(2)
+
+    def sell():
+        barrier.wait(timeout=5)
+        return operation(portfolio_client, headers, type="sell", quantity="7")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(sell) for _ in range(2)]
+        responses = [f.result(timeout=10) for f in futures]
+    assert sorted(r.status_code for r in responses) == [201, 429]
+    history = stored_history(session_factory, owner)
+    assert len(history) == 2
+    assert Portfolio(history).positions["TEST3"].quantity == Decimal(3)
+    assert Portfolio(history).get_total_cost() == Decimal(90)
+
+
+@pytest.mark.parametrize("size", [300, 3000, 30000])
+def test_long_history_has_one_write_reconstruction_and_can_still_be_sold(
+    portfolio_client, owners, catalog, session_factory, monkeypatch, size
+):
+    owner, headers = owners[0]
+    # Bulk seed only facts in the disposable database; no derived balances.
+    with session_factory.begin() as session:
+        session.execute(
+            insert(TransactionModel),
+            [
+                {
+                    "id": uuid4(),
+                    "user_id": owner,
+                    "asset_ticker": "TEST3",
+                    "quantity": Decimal(1),
+                    "price": Decimal(30),
+                    "transaction_type": "buy",
+                    "transaction_date": date(2026, 1, 1),
+                }
+                for _ in range(size)
+            ],
+        )
+    reads, writes = [], []
+    for _ in range(3):
+        started = perf_counter()
+        response = portfolio_client.get("/api/v1/portfolio/positions", headers=headers)
+        reads.append((perf_counter() - started) * 1000)
+        assert response.status_code == 200
+        assert Decimal(response.json()["total_cost"]) == Decimal(size * 30)
+    visited = []
+    calculate = Position._calculate
+
+    def counted(self, transactions):
+        visited.append(len(transactions))
+        return calculate(self, transactions)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Position, "_calculate", counted)
+        for _ in range(3):
+            started = perf_counter()
+            response = operation(portfolio_client, headers, type="sell", quantity="1")
+            writes.append((perf_counter() - started) * 1000)
+            assert response.status_code == 201
+    assert visited == [size + 1, size + 2, size + 3]
+    history = stored_history(session_factory, owner)
+    assert len(history) == size + 3
+    assert Portfolio(history).get_total_cost() == Decimal((size - 3) * 30)
+    # Even a long existing history can be liquidated; the quota is temporal.
+    assert (
+        operation(
+            portfolio_client, headers, type="sell", quantity=str(size - 3)
+        ).status_code
+        == 201
+    )
+    assert Portfolio(stored_history(session_factory, owner)).positions == {}
+    from statistics import median
+
+    print(
+        f"history={size} HTTP/PostgreSQL median positions_ms={median(reads):.3f} write_ms={median(writes):.3f}"
+    )

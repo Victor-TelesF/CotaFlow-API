@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 import domain.portfolio.transaction as transaction_module
 import main
+from application.assets import register_asset
+from domain.enums import AssetType
 from infrastructure.config import MarketSettings, SecuritySettings, Settings
 from infrastructure.database.unit_of_work import SqlAlchemyUnitOfWork
 
@@ -84,16 +86,19 @@ def test_public_delivery_flow(session_factory, monkeypatch, provider_status):
         owner, outsider = headers
         assert users[0]["id"] != users[1]["id"]
         assert client.get(POSITIONS).status_code == 401
-        asset = client.post(
-            f"{PREFIX}/assets",
-            headers=owner,
-            json={"ticker": " test3 ", "name": "Synthetic stock", "type": "stock"},
+        assert (
+            client.post(
+                f"{PREFIX}/assets",
+                headers=owner,
+                json={"ticker": "TEST3", "name": "Synthetic stock", "type": "stock"},
+            ).status_code
+            == 405
         )
-        assert asset.status_code == 201
-        assert asset.json()["ticker"] == "TEST3"
-        # Catálogo é compartilhado, histórico financeiro não.
+        asset = register_asset(
+            " test3 ", "Synthetic stock", AssetType.STOCK, app.state.uow_factory
+        )
         assert client.get(f"{PREFIX}/assets", headers=outsider).json()["items"] == [
-            asset.json()
+            {"ticker": asset.ticker, "name": asset.name, "type": "stock"}
         ]
 
         def write(quantity, price, kind="buy"):
