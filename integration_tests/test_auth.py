@@ -290,3 +290,244 @@ def test_real_database_failure_does_not_expose_sql_or_credentials(
         "password_hash",
     ):
         assert private not in response.text
+
+
+def test_registration_quota_counts_success_and_conflicts_without_extra_hash_or_write(
+    auth_client, session_factory, monkeypatch
+):
+    from infrastructure.auth_limits import AuthenticationLimits
+    from infrastructure.config import AuthSettings
+
+    clock = [0.0]
+    auth_client.app.state.auth_limits = AuthenticationLimits(
+        AuthSettings(_env_file=None), clock=lambda: clock[0]
+    )
+    passwords = auth_client.app.state.passwords
+    original_hash = passwords.hash
+    hashes = []
+    statements = []
+    engine = session_factory.kw["bind"]
+
+    def hash_password(password):
+        hashes.append(True)
+        return original_hash(password)
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    monkeypatch.setattr(passwords, "hash", hash_password)
+    body = {"email": "alice@example.com", "password": "correct-password"}
+    assert auth_client.post("/api/v1/auth/register", json=body).status_code == 201
+    with session_factory() as session:
+        persisted_hash = session.scalar(select(UserModel)).password_hash
+    for _ in range(4):
+        assert auth_client.post("/api/v1/auth/register", json=body).status_code == 409
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        response = auth_client.post(
+            "/api/v1/auth/register",
+            json={"email": "bob@example.com", "password": "other-password"},
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "600"
+    assert len(hashes) == 5
+    assert statements == []
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(UserModel)) == 1
+        assert session.scalar(select(UserModel)).password_hash == persisted_hash
+    clock[0] = 600
+    assert (
+        auth_client.post(
+            "/api/v1/auth/register",
+            json={"email": "bob@example.com", "password": "other-password"},
+        ).status_code
+        == 201
+    )
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(UserModel)) == 2
+    assert len(hashes) == 6
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_pair_rejection_does_not_lookup_verify_or_modify_user(
+    auth_client, session_factory, monkeypatch, exists
+):
+    from infrastructure.auth_limits import AuthenticationLimits
+    from infrastructure.config import AuthSettings
+
+    clock = [0.0]
+    auth_client.app.state.auth_limits = AuthenticationLimits(
+        AuthSettings(_env_file=None), clock=lambda: clock[0]
+    )
+    if exists:
+        assert (
+            auth_client.post(
+                "/api/v1/auth/register",
+                json={"email": "alice@example.com", "password": "correct-password"},
+            ).status_code
+            == 201
+        )
+    passwords = auth_client.app.state.passwords
+    original_verify = passwords.verify
+    verified_hashes = []
+    statements = []
+    engine = session_factory.kw["bind"]
+
+    def verify(password, password_hash):
+        assert engine.pool.checkedout() == 0
+        verified_hashes.append(password_hash)
+        return original_verify(password, password_hash)
+
+    def observe(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    monkeypatch.setattr(passwords, "verify", verify)
+    body = {"email": "alice@example.com", "password": "wrong-password"}
+    for _ in range(5):
+        response = auth_client.post("/api/v1/auth/login", json=body)
+        assert response.status_code == 401
+        assert response.json() == {
+            "code": "invalid_credentials",
+            "message": "Authentication failed",
+        }
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        response = auth_client.post(
+            "/api/v1/auth/login", json=body | {"email": " ALICE@EXAMPLE.COM "}
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "300"
+    assert statements == []
+    assert len(verified_hashes) == 5
+    assert all((value is not None) == exists for value in verified_hashes)
+    with session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(UserModel)) == int(
+            exists
+        )
+        if exists:
+            assert session.scalar(select(UserModel)).password_hash == verified_hashes[0]
+    clock[0] = 300
+    assert auth_client.post("/api/v1/auth/login", json=body).status_code == 401
+    assert len(verified_hashes) == 6
+
+
+def test_parallel_auth_slots_reject_before_hash_or_sql_and_recover(
+    auth_client, session_factory, monkeypatch
+):
+    from threading import Event
+
+    passwords = auth_client.app.state.passwords
+    original_hash = passwords.hash
+    entered = Barrier(3)
+    release = Event()
+    hashes = []
+    engine = session_factory.kw["bind"]
+
+    def held_hash(password):
+        hashes.append(True)
+        assert engine.pool.checkedout() == 0
+        entered.wait(timeout=5)
+        assert release.wait(timeout=5)
+        return original_hash(password)
+
+    def registration(email):
+        return auth_client.post(
+            "/api/v1/auth/register",
+            json={"email": email, "password": "synthetic-password"},
+        )
+
+    monkeypatch.setattr(passwords, "hash", held_hash)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(registration, email)
+            for email in ("alice@example.com", "bob@example.com")
+        ]
+        try:
+            entered.wait(timeout=5)
+            assert engine.pool.checkedout() == 0
+            response = registration("carol@example.com")
+            assert response.status_code == 429
+            assert response.headers["Retry-After"] == "1"
+            assert len(hashes) == 2
+            with session_factory() as session:
+                assert session.scalar(select(func.count()).select_from(UserModel)) == 0
+        finally:
+            release.set()
+        assert [future.result(timeout=10).status_code for future in futures] == [
+            201,
+            201,
+        ]
+    monkeypatch.setattr(passwords, "hash", original_hash)
+    assert registration("carol@example.com").status_code == 201
+    with session_factory() as session:
+        assert set(session.scalars(select(UserModel.email))) == {
+            "alice@example.com",
+            "bob@example.com",
+            "carol@example.com",
+        }
+    assert engine.pool.checkedout() == 0
+
+
+def test_body_rejection_preserves_database_and_boundary_request_succeeds(
+    auth_client, session_factory, monkeypatch
+):
+    import json
+
+    passwords = auth_client.app.state.passwords
+    real_hash = passwords.hash
+    hashes = []
+
+    def observed_hash(password):
+        hashes.append(True)
+        return real_hash(password)
+
+    monkeypatch.setattr(passwords, "hash", observed_hash)
+    payload = json.dumps(
+        {"email": "alice@example.com", "password": "synthetic-password"}
+    ).encode()
+    for size, expected in [(16385, 413), (16384, 201)]:
+        response = auth_client.post(
+            "/api/v1/auth/register",
+            content=payload + b" " * (size - len(payload)),
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == expected
+        with session_factory() as session:
+            assert session.scalar(select(func.count()).select_from(UserModel)) == (
+                0 if expected == 413 else 1
+            )
+        assert len(hashes) == (0 if expected == 413 else 1)
+
+
+def test_configured_frontend_can_use_real_bearer_without_cookie_auth(
+    request, monkeypatch
+):
+    origin = "https://synthetic-frontend.vercel.app"
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", f'["{origin}"]')
+    client = request.getfixturevalue("auth_client")
+    payload = {"email": "frontend@example.com", "password": "synthetic-password"}
+    registered = client.post(
+        "/api/v1/auth/register", json=payload, headers={"Origin": origin}
+    )
+    assert registered.status_code == 201
+    logged_in = client.post(
+        "/api/v1/auth/login", json=payload, headers={"Origin": origin}
+    )
+    assert logged_in.status_code == 200
+    assert logged_in.headers["access-control-allow-origin"] == origin
+    token = logged_in.json()["access_token"]
+    positions = client.get(
+        "/api/v1/portfolio/positions",
+        headers={"Origin": origin, "Authorization": f"Bearer {token}"},
+    )
+    assert positions.status_code == 200
+    assert positions.headers["access-control-allow-origin"] == origin
+    assert "access-control-allow-credentials" not in positions.headers
+    missing = client.get("/api/v1/portfolio/positions", headers={"Origin": origin})
+    assert missing.status_code == 401
+    assert missing.json()["code"] == "invalid_token"
+    assert missing.headers["access-control-allow-origin"] == origin
