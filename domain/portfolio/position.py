@@ -5,6 +5,7 @@ Compras ponderam a média, vendas parciais a preservam e zeragem encerra o
 ciclo, permitindo que uma recompra inicie outro custo.
 """
 
+from copy import copy
 from decimal import Decimal, localcontext
 
 from ..assets import Asset
@@ -28,7 +29,7 @@ class Position:
             raise InvalidValueError("Asset deve ser uma instância de Asset")
         self._asset = asset
         transactions = ordered_transactions(list(transaction_list or []))
-        self._calculate(transactions)
+        self._state = self._calculate(transactions)
         self._transaction_list = transactions
 
     @property
@@ -74,24 +75,33 @@ class Position:
     def add_transaction(self, transaction: Transaction) -> None:
         """Aceita uma operação somente se o histórico completo continuar válido."""
         candidates = ordered_transactions([*self._transaction_list, transaction])
-        self._calculate(candidates)
+        state = self._calculate(candidates)
         self._transaction_list = candidates
+        self._state = state
+
+    def copy(self) -> "Position":
+        """Fotografia independente; adições substituem histórico/estado após validar.
+
+        Transações e Decimals são imutáveis. Compartilhar a lista privada é
+        seguro: leitores recebem cópias e nenhuma escrita a altera in-place.
+        """
+        return copy(self)
 
     @property
     def quantity(self) -> Decimal:
-        """Reconstrói a quantidade aberta após todas as compras e vendas."""
-        return self._calculate(self._transaction_list)[0]
+        """Quantidade da fotografia já validada, sem novo percurso do histórico."""
+        return self._state[0]
 
     @property
     def average_price(self) -> Decimal:
-        """Reconstrói a média do ciclo aberto; posição zerada tem média zero."""
-        return self._calculate(self._transaction_list)[1]
+        """Média do ciclo aberto já calculada; posição zerada tem média zero."""
+        return self._state[1]
 
     @property
     def cost(self) -> Decimal:
         """Calcula o custo da posição aberta: quantidade vezes preço médio."""
         with localcontext(CALCULATION_CONTEXT):
-            quantity, average = self._calculate(self._transaction_list)
+            quantity, average = self._state
             return quantity * average
 
     def market_value(self, price: Decimal) -> Decimal:

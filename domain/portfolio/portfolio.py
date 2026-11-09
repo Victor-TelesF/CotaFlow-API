@@ -28,7 +28,7 @@ class Portfolio:
     def __init__(self, transaction_list: list[Transaction] | None = None):
         """Copia e ordena o histórico, rejeitando qualquer saldo histórico inválido."""
         transactions = ordered_transactions(list(transaction_list or []))
-        self._rebuild_positions(transactions)
+        self._positions = self._rebuild_positions(transactions)
         self._transaction_list = transactions
 
     @staticmethod
@@ -49,16 +49,14 @@ class Portfolio:
 
     @property
     def positions(self) -> dict[str, Position]:
-        """Reconstrói somente posições abertas em objetos independentes.
+        """Retorna somente posições abertas em objetos independentes.
 
         Alterar uma posição retornada não modifica a carteira. O resultado
-        é recalculado a partir do histórico; não é um cache de saldos.
+        usa o resultado validado desta fotografia, sem repetir o histórico.
         """
         return {
-            ticker: position
-            for ticker, position in self._rebuild_positions(
-                self._transaction_list
-            ).items()
+            ticker: position.copy()
+            for ticker, position in self._positions.items()
             if position.quantity > 0
         }
 
@@ -69,8 +67,9 @@ class Portfolio:
         posteriores de uma compra/venda retroativa, não apenas o saldo final.
         """
         candidates = ordered_transactions([*self._transaction_list, transaction])
-        self._rebuild_positions(candidates)
+        positions = self._rebuild_positions(candidates)
         self._transaction_list = candidates
+        self._positions = positions
 
     def buy(
         self,
