@@ -5,7 +5,7 @@ description = "API de carteira de ações brasileiras e FIIs com cotações auto
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
-    "fastapi>=0.162.0,<0.163",
+    "fastapi>=0.162.0,<0.166",
     "uvicorn>=0.54.0,<0.55",
     "sqlalchemy>=2.1.8,<2.2",
     "alembic>=1.20.1,<2",
